@@ -88,15 +88,26 @@ class FluxPuLIDControlNetGenerator(CounterfactualGenerator):
         )
 
     def _quant_config(self):
-        """Quantization config for L4 fit. FP8 preferred; NF4 as smaller fallback."""
+        """Quantization config for L4 fit. FP8 preferred; NF4 as smaller fallback.
+
+        diffusers >=0.32 requires PipelineQuantizationConfig wrapping the
+        BitsAndBytesConfig per-component, not a raw BitsAndBytesConfig.
+        """
         if self.dtype not in {"fp8", "nf4"}:
             return None
-        from transformers import BitsAndBytesConfig
+        from diffusers import PipelineQuantizationConfig
 
         if self.dtype == "fp8":
-            # 8-bit weights — preserves identity fidelity, small quality loss
-            return BitsAndBytesConfig(load_in_8bit=True)
-        return BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4")
+            return PipelineQuantizationConfig(
+                quant_backend="bitsandbytes_8bit",
+                quant_kwargs={"load_in_8bit": True},
+                components_to_quantize=["transformer", "text_encoder_2"],
+            )
+        return PipelineQuantizationConfig(
+            quant_backend="bitsandbytes_4bit",
+            quant_kwargs={"load_in_4bit": True, "bnb_4bit_quant_type": "nf4"},
+            components_to_quantize=["transformer", "text_encoder_2"],
+        )
 
     def _lazy_load(self) -> None:
         if self._pipeline is not None:
