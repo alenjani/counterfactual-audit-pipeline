@@ -7,6 +7,7 @@ from pathlib import Path
 import click
 import pandas as pd
 
+from cap.data import load_or_sample_seeds
 from cap.generator import FluxPuLIDControlNetGenerator, GenerationRequest
 from cap.utils import RunManifest, get_logger, load_config, set_global_seed
 
@@ -66,8 +67,18 @@ def main(config_path: str, limit: int | None) -> None:
 
 
 def _load_seed_identities(cfg) -> list[dict]:
-    # TODO: implement FairFace loading + stratified sampling
-    return []
+    """Load (or sample) FairFace seed identities per config."""
+    si_cfg = cfg["seed_identities"]
+    if si_cfg.get("source") != "fairface":
+        raise ValueError(f"Unsupported seed source: {si_cfg.get('source')}. Only 'fairface' is wired.")
+    seeds = load_or_sample_seeds(
+        output_dir=cfg["paths.seed_dataset"],
+        n=int(si_cfg["count"]),
+        stratify_by=list(si_cfg.get("stratify_by", ["race", "gender", "age"])),
+        seed=cfg.get("seed", 42),
+    )
+    return [{"id": s.id, "image_path": s.image_path,
+             "race": s.race, "gender": s.gender, "age": s.age} for s in seeds]
 
 
 def _result_to_dict(result) -> dict:

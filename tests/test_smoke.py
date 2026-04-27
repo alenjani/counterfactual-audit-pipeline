@@ -118,6 +118,44 @@ def test_viz_theme_applies():
     plt.close(fig)
 
 
+def test_seed_manifest_roundtrip(tmp_path):
+    from cap.data import SeedIdentity, load_seed_manifest, save_seed_manifest
+
+    seeds = [
+        SeedIdentity(id="ff000001", image_path=str(tmp_path / "a.jpg"),
+                     race="White", gender="Male", age="20-29", source_index=1),
+        SeedIdentity(id="ff000002", image_path=str(tmp_path / "b.jpg"),
+                     race="Black", gender="Female", age="30-39", source_index=2),
+    ]
+    path = tmp_path / "manifest.json"
+    save_seed_manifest(seeds, path)
+    loaded = load_seed_manifest(path)
+    assert len(loaded) == 2
+    assert loaded[0].id == "ff000001"
+    assert loaded[1].race == "Black"
+
+
+def test_stratified_sample_balance():
+    """Stratified sample should distribute roughly evenly across cells."""
+    import pandas as pd
+
+    from cap.data.fairface import FairFaceLoader
+
+    df = pd.DataFrame({
+        "race": (["White"] * 200 + ["Black"] * 200 + ["East Asian"] * 200),
+        "gender": (["Male", "Female"] * 300),
+        "age": (["20-29", "30-39", "40-49"] * 200),
+        "service_test": [False] * 600,
+        "source_index": list(range(600)),
+    })
+    loader = FairFaceLoader(output_dir="/tmp/_unused", split="1.25")
+    sampled = loader.stratified_sample(df, n=60, stratify_by=["race", "gender"], seed=42)
+    assert len(sampled) == 60
+    # Each (race × gender) cell should have ~10 samples (60 / 6 cells)
+    counts = sampled.groupby(["race", "gender"]).size()
+    assert counts.min() >= 8 and counts.max() <= 12
+
+
 def test_intersectional_heatmap():
     import pandas as pd
 
