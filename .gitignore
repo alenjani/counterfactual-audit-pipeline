@@ -25,6 +25,8 @@ env/
 # Notebooks
 .ipynb_checkpoints/
 *.ipynb_meta
+*.executed.ipynb
+notebooks/smoke_outputs/
 
 # Data, models, outputs (LARGE — never commit). Anchored to repo root so they
 # don't shadow src/cap/data/ or src/cap/models/ (those ARE tracked source code).
