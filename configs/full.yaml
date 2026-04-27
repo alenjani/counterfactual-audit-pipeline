@@ -1,0 +1,104 @@
+# Full run — reusable scientific instrument across all four planned papers.
+# 200 seed identities × 60 counterfactual variations (6 skin × 2 gender × 5 age) × 3 seeds ≈ 18K images.
+# 7 auditors × 7 tasks ≈ 880K audit data points.
+# Paper 1 uses ~5–10% of this; rest is runway for Papers 2–4.
+# Expected runtime on L4: ~150–300 GPU hours, split across multiple sessions.
+
+run_id: full_${env:USER}_${date:%Y%m%d}
+seed: 42
+
+paths:
+  seed_dataset: data/fairface
+  output_dir: outputs/full
+  generated_dir: outputs/full/generated
+  audit_dir: outputs/full/audit
+  analysis_dir: outputs/full/analysis
+  viz_dir: outputs/full/viz
+
+generator:
+  backend: flux_pulid_controlnet
+  device: cuda
+  dtype: fp8
+  num_inference_steps: 28
+  guidance_scale: 3.5
+  width: 1024
+  height: 1024
+
+seed_identities:
+  source: fairface
+  count: 200
+  stratify_by: [race, gender, age]
+
+counterfactual_axes:
+  skin_tone: [1, 2, 3, 4, 5, 6]
+  gender: [male, female]
+  age: [20, 30, 40, 50, 60]
+
+generation_seeds: [42, 137, 2718]    # 3 seeds per counterfactual for robustness
+
+fixed_attributes:
+  pose: frontal
+  expression: neutral expression
+  lighting: soft even studio lighting
+
+validators:
+  identity:
+    enabled: true
+    threshold: 0.5
+  fid:
+    enabled: true
+    reference_set: data/fairface/reference_distribution
+  attributes:
+    enabled: true
+
+auditors:
+  - name: aws_rekognition
+    kwargs:
+      region_name: us-east-1
+  - name: azure_face
+    kwargs:
+      endpoint: ${env:AZURE_FACE_ENDPOINT}
+      key: ${env:AZURE_FACE_KEY}
+  - name: google_vision
+    kwargs: {}
+  - name: face_plus_plus
+    kwargs: {}
+  - name: deepface
+    kwargs:
+      detector_backend: retinaface
+  - name: insightface
+    kwargs:
+      model_name: buffalo_l
+  - name: arcface
+    kwargs: {}
+
+tasks:
+  - gender
+  - age
+  - race
+  - emotion
+  - identity_verification
+  - face_detection
+  - attractiveness
+
+analysis:
+  fdr_alpha: 0.05
+  bootstrap_iters: 5000
+  per_paper_slices:
+    paper_1_isr:
+      auditors: [aws_rekognition, azure_face, deepface, insightface]
+      tasks: [gender, age]
+      axes: [skin_tone, gender]
+    paper_2_emotion:
+      auditors: all
+      tasks: [emotion]
+      axes: [skin_tone, gender, age]
+    paper_3_oss_vs_commercial:
+      auditors: all
+      tasks: [gender, age, race]
+      group_by: [commercial_vs_oss]
+
+viz:
+  formats: [pdf, svg, png]
+  dpi: 300
+  build_interactive_dashboard: true

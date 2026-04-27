@@ -1,0 +1,30 @@
+# GCP-specific overrides — paths point to GCS buckets, not local disk.
+# Merge on top of mvp.yaml or full.yaml: cap-generate --config configs/full.yaml --override-config configs/gcp.yaml
+
+gcp:
+  project_id: ${env:GCP_PROJECT_ID}
+  region: us-central1
+  zone: us-central1-a
+  bucket: ${env:GCS_BUCKET}            # e.g. cap-pipeline-runs
+  artifact_registry: us-central1-docker.pkg.dev/${env:GCP_PROJECT_ID}/cap
+
+vm:
+  machine_type: g2-standard-8           # 1× L4, 8 vCPU, 32 GB RAM
+  accelerator: nvidia-l4
+  accelerator_count: 1
+  disk_size_gb: 200
+  disk_type: pd-ssd
+  preemptible: false                    # stability > cost for long generation runs
+  auto_delete_on_completion: true
+
+paths:
+  seed_dataset: gs://${gcp.bucket}/data/fairface
+  output_dir: gs://${gcp.bucket}/runs/${run_id}
+  generated_dir: gs://${gcp.bucket}/runs/${run_id}/generated
+  audit_dir: gs://${gcp.bucket}/runs/${run_id}/audit
+  analysis_dir: gs://${gcp.bucket}/runs/${run_id}/analysis
+  viz_dir: gs://${gcp.bucket}/runs/${run_id}/viz
+
+logging:
+  log_to_gcs: true
+  wandb_project: cap-counterfactual-audit

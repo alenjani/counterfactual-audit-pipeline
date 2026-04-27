@@ -1,0 +1,65 @@
+# MVP run — small-scale validation that the full pipeline works end-to-end.
+# 50 seed identities × 12 counterfactual variations (6 skin tones × 2 genders) = 600 images.
+# 1 auditor (DeepFace, free + local) for fastest iteration.
+# Expected runtime on L4: ~5-8 hours.
+
+run_id: mvp_${env:USER}_${date:%Y%m%d}
+seed: 42
+
+paths:
+  seed_dataset: data/fairface
+  output_dir: outputs/mvp
+  generated_dir: outputs/mvp/generated
+  audit_dir: outputs/mvp/audit
+  analysis_dir: outputs/mvp/analysis
+  viz_dir: outputs/mvp/viz
+
+generator:
+  backend: flux_pulid_controlnet
+  device: cuda
+  dtype: fp8                       # FP8 for L4 (24GB VRAM)
+  num_inference_steps: 28
+  guidance_scale: 3.5
+  width: 1024
+  height: 1024
+
+seed_identities:
+  source: fairface
+  count: 50
+  stratify_by: [race, gender, age]   # balanced sample
+
+counterfactual_axes:
+  skin_tone: [1, 2, 3, 4, 5, 6]      # Fitzpatrick I–VI
+  gender: [male, female]
+
+fixed_attributes:
+  pose: frontal
+  expression: neutral expression
+  lighting: soft even studio lighting
+
+validators:
+  identity:
+    enabled: true
+    threshold: 0.5
+  fid:
+    enabled: false                   # skip for MVP
+  attributes:
+    enabled: true
+
+auditors:
+  - name: deepface
+    kwargs:
+      detector_backend: retinaface
+
+tasks:
+  - gender
+  - age
+
+analysis:
+  fdr_alpha: 0.05
+  bootstrap_iters: 1000
+
+viz:
+  formats: [pdf, png]
+  dpi: 300
+  build_interactive_dashboard: true

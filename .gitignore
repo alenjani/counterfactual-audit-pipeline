@@ -1,0 +1,88 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+.eggs/
+
+# Virtual envs
+.venv/
+venv/
+env/
+.env
+
+# Notebooks
+.ipynb_checkpoints/
+*.ipynb_meta
+
+# Data, models, outputs (LARGE — never commit)
+data/
+outputs/
+runs/
+checkpoints/
+models/
+*.pt
+*.safetensors
+*.onnx
+*.bin
+*.gguf
+*.ckpt
+*.pkl
+
+# Generated images / datasets
+generated/
+counterfactuals/
+audit_logs/
+*.parquet
+*.feather
+
+# Visualization outputs (allow committed templates, ignore run outputs)
+viz_outputs/
+figures/*.png
+figures/*.pdf
+figures/*.svg
+figures/*.html
+!figures/.gitkeep
+
+# Logs
+*.log
+logs/
+wandb/
+mlruns/
+
+# Secrets / credentials — NEVER commit
+.env.local
+*.pem
+*.key
+service-account*.json
+gcp-credentials*.json
+aws-credentials*
+azure-credentials*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Docker
+.docker/
+
+# Caches
+.cache/
+.huggingface/
