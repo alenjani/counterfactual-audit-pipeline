@@ -26,12 +26,13 @@ env/
 .ipynb_checkpoints/
 *.ipynb_meta
 
-# Data, models, outputs (LARGE — never commit)
-data/
-outputs/
-runs/
-checkpoints/
-models/
+# Data, models, outputs (LARGE — never commit). Anchored to repo root so they
+# don't shadow src/cap/data/ or src/cap/models/ (those ARE tracked source code).
+/data/
+/outputs/
+/runs/
+/checkpoints/
+/models/
 *.pt
 *.safetensors
 *.onnx
