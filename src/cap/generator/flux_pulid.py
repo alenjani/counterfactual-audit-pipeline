@@ -48,6 +48,18 @@ from cap.utils.logging import get_logger
 
 logger = get_logger()
 
+# InstantX/FLUX.1-dev-Controlnet-Union mode index (required by the model's
+# forward pass — passed as `control_mode` int alongside the control image).
+_CONTROLNET_UNION_MODE_INDEX = {
+    "canny": 0,
+    "tile": 1,
+    "depth": 2,
+    "blur": 3,
+    "pose": 4,
+    "gray": 5,
+    "lq": 6,
+}
+
 
 class FluxPuLIDControlNetGenerator(CounterfactualGenerator):
     def __init__(
@@ -285,6 +297,10 @@ class FluxPuLIDControlNetGenerator(CounterfactualGenerator):
             if control_image is not None:
                 pipe_kwargs["control_image"] = control_image
                 pipe_kwargs["controlnet_conditioning_scale"] = 0.6
+                # InstantX/FLUX.1-dev-Controlnet-Union requires an integer
+                # control_mode telling it which conditioning type this is.
+                # Without it, FluxControlNetModel.forward raises ValueError.
+                pipe_kwargs["control_mode"] = _CONTROLNET_UNION_MODE_INDEX[self.controlnet_mode]
             if self.identity_path == "ip_adapter" and id_embedding is not None:
                 pipe_kwargs["ip_adapter_image_embeds"] = [
                     torch.from_numpy(id_embedding).unsqueeze(0).to(self.device)
