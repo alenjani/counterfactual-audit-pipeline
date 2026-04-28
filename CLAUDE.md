@@ -14,7 +14,7 @@ Concretely, this means:
 
 3. **Quantization must preserve identity fidelity.** FP8 (`bitsandbytes_8bit`) is the floor; NF4 only when L4 memory genuinely won't fit. Both wrapped in `PipelineQuantizationConfig` per the diffusers >=0.32 API.
 
-4. **Resolution must match the audited systems.** Default 1024×1024 — don't drop to 512 or 768 to save VRAM. If memory is tight, prefer NF4 or a different GPU over reducing resolution.
+4. **Resolution must be high enough to resolve facial features.** Floor is **768×768**. The auditees (AWS, Azure, Face++, Google Vision, DeepFace, InsightFace) all internally resize to 112–224 px for recognition and a few hundred for detection — pushing above 768² doesn't change what they consume. 512 or 224 would be too coarse to keep skin-tone, age, and identity cues sharp; 768² is the practical sweet spot on a 24 GB L4 with the full Flux + ControlNet + PuLID + IP-Adapter stack. Going higher (1024+) is fine if VRAM allows, but not required.
 
 5. **Smoke tests are explicit and short-lived.** A smoke notebook may take quality shortcuts to validate plumbing — it must be labeled as such and never used as the production code path. MVP and full runs always use the full-quality settings.
 
