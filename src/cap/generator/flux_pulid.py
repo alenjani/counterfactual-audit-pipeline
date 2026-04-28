@@ -61,6 +61,7 @@ class FluxPuLIDControlNetGenerator(CounterfactualGenerator):
         cache_dir: str | None = None,
         identity_path: str = "pulid",  # "pulid" | "ip_adapter" | "none"
         controlnet_mode: str = "pose",  # ControlNet-Union mode index
+        face_model_name: str = "antelopev2",  # InsightFace model pack: "antelopev2" (preferred) or "buffalo_l" (smaller fallback)
     ):
         self.flux_model_id = flux_model_id
         self.controlnet_model_id = controlnet_model_id
@@ -71,6 +72,7 @@ class FluxPuLIDControlNetGenerator(CounterfactualGenerator):
         self.cache_dir = cache_dir
         self.identity_path = identity_path
         self.controlnet_mode = controlnet_mode
+        self.face_model_name = face_model_name
 
         self._pipeline = None
         self._pulid = None
@@ -166,11 +168,28 @@ class FluxPuLIDControlNetGenerator(CounterfactualGenerator):
         insightface_root = self.cache_dir or "/tmp/insightface_models"
         Path(insightface_root).mkdir(parents=True, exist_ok=True)
 
-        self._face_app = FaceAnalysis(
-            name="antelopev2",
-            root=insightface_root,
-            providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
-        )
+        # Diagnostic: check what's in the model dir before FaceAnalysis tries to load.
+        # If FaceAnalysis fails the 'detection' assertion, this tells us whether the
+        # auto-download even happened.
+        import os as _os
+        model_pack_dir = _os.path.join(insightface_root, "models", self.face_model_name)
+        before = sorted(_os.listdir(model_pack_dir)) if _os.path.isdir(model_pack_dir) else "(missing)"
+        logger.info(f"insightface model dir before load: {model_pack_dir} -> {before}")
+
+        try:
+            self._face_app = FaceAnalysis(
+                name=self.face_model_name,
+                root=insightface_root,
+                providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
+            )
+        except AssertionError:
+            after = sorted(_os.listdir(model_pack_dir)) if _os.path.isdir(model_pack_dir) else "(still missing)"
+            raise RuntimeError(
+                f"InsightFace failed to populate {model_pack_dir} (auto-download likely blocked). "
+                f"Dir contents after attempt: {after}. "
+                f"Either fix the cluster's egress to insightface release URLs, or pre-stage the "
+                f"{self.face_model_name} ONNX files into {model_pack_dir} before calling generator."
+            )
         self._face_app.prepare(ctx_id=0 if self.device == "cuda" else -1, det_size=(640, 640))
 
         logger.info(f"Pipeline loaded in {time.time() - t0:.1f}s")
