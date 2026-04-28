@@ -92,12 +92,11 @@ dev = [
     "ipykernel>=6.29",
     "jupyterlab>=4.2",
 ]
-# PuLID-Flux is the required identity-injection path (per CLAUDE.md item 2).
-# Not on PyPI; install via `pip install -e ".[gpu]"` or directly from the
-# notebook (see notebooks/01_databricks_ray_smoke.ipynb for the install line).
-gpu = [
-    "pulid @ git+https://github.com/ToTheBeginning/PuLID.git",
-]
+# PuLID-Flux (required identity-injection path per CLAUDE.md item 2) is NOT on
+# PyPI and isn't cleanly pip-installable from its source repo. Install path:
+# clone https://github.com/ToTheBeginning/PuLID.git to a known location and
+# `sys.path.insert(0, <clone>)` before `import pulid.pipeline_flux`. The smoke
+# notebook does this against a Workspace Volume so the clone persists.
 
 [project.scripts]
 cap-generate = "cap.cli.generate:main"
