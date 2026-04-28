@@ -1,7 +1,20 @@
-"""CLI: generate counterfactual images from seed identities or text prompts."""
+"""CLI: generate counterfactual images from seed identities or text prompts.
+
+Two backends:
+  - `local`  — single-process loop on the current GPU. Fine for the smoke and
+               for sub-MVP scale (≤50 images). Defaults to backend=local.
+  - `ray`    — fan out across N Ray actors (one per GPU). Use for MVP and full
+               runs. Each actor holds Flux + ControlNet + PuLID + InsightFace
+               in VRAM and pulls requests from a shared queue.
+
+Both backends produce idempotent output: re-running with the same config and
+output_dir skips counterfactuals whose PNGs already exist (resume-from-crash
+is free).
+"""
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import click
@@ -17,7 +30,42 @@ logger = get_logger()
 @click.command()
 @click.option("--config", "config_path", required=True, help="Path to config YAML")
 @click.option("--limit", default=None, type=int, help="Limit to first N seed identities (for debugging)")
-def main(config_path: str, limit: int | None) -> None:
+@click.option(
+    "--backend",
+    type=click.Choice(["local", "ray"]),
+    default="local",
+    help="Generation backend. local=single GPU, ray=multi-GPU fan-out.",
+)
+@click.option(
+    "--num-actors",
+    default=4,
+    type=int,
+    help="Ray fan-out width (only used when --backend=ray)",
+)
+@click.option(
+    "--hf-token",
+    default=None,
+    help="HF token for gated repos. If unset, falls back to HF_TOKEN env var.",
+)
+@click.option(
+    "--pulid-src",
+    default=None,
+    help="Path to PuLID source dir (sys.path-imported by actors). Only for --backend=ray.",
+)
+@click.option(
+    "--cache-dir",
+    default=None,
+    help="HF model cache dir. Override the per-actor default for Volume-backed cache.",
+)
+def main(
+    config_path: str,
+    limit: int | None,
+    backend: str,
+    num_actors: int,
+    hf_token: str | None,
+    pulid_src: str | None,
+    cache_dir: str | None,
+) -> None:
     cfg = load_config(config_path)
     set_global_seed(cfg.get("seed", 42))
 
@@ -31,39 +79,87 @@ def main(config_path: str, limit: int | None) -> None:
     )
 
     gen_cfg = cfg["generator"]
-    generator = FluxPuLIDControlNetGenerator(
-        device=gen_cfg.get("device", "cuda"),
-        dtype=gen_cfg.get("dtype", "fp8"),
-    )
-    manifest.model_versions = generator.model_versions()
-
     seeds = _load_seed_identities(cfg)
     if limit is not None:
         seeds = seeds[:limit]
-    logger.info(f"Generating counterfactuals for {len(seeds)} seed identities")
+    logger.info(f"Generating counterfactuals for {len(seeds)} seed identities (backend={backend})")
 
-    all_results = []
-    for seed in seeds:
-        request = GenerationRequest(
-            seed_identity_id=seed["id"],
-            seed_image_path=seed["image_path"],
-            seed_prompt=None,
-            counterfactual_axes=cfg["counterfactual_axes"],
-            fixed_attributes=cfg.get("fixed_attributes", {}),
-            seed=cfg.get("seed", 42),
-            num_inference_steps=gen_cfg.get("num_inference_steps", 28),
-            guidance_scale=gen_cfg.get("guidance_scale", 3.5),
-            width=gen_cfg.get("width", 1024),
-            height=gen_cfg.get("height", 1024),
+    # Build the request list once — both backends consume the same shape.
+    requests = [_seed_to_request(s, cfg, gen_cfg) for s in seeds]
+
+    if backend == "local":
+        generator = FluxPuLIDControlNetGenerator(
+            device=gen_cfg.get("device", "cuda"),
+            dtype=gen_cfg.get("dtype", "fp8"),
+            cache_dir=cache_dir,
+            controlnet_mode=gen_cfg.get("controlnet_mode", "pose"),
+            face_model_name=gen_cfg.get("face_model_name", "antelopev2"),
         )
-        results = generator.generate(request, generated_dir)
-        all_results.extend([_result_to_dict(r) for r in results])
+        manifest.model_versions = generator.model_versions()
+
+        all_results: list[dict] = []
+        for request in requests:
+            results = generator.generate(request, generated_dir)
+            all_results.extend(_result_to_dict(r) for r in results)
+
+    elif backend == "ray":
+        import ray
+
+        from cap.generator.ray_runner import run_distributed
+
+        actor_kwargs = {
+            "dtype": gen_cfg.get("dtype", "nf4"),
+            "controlnet_mode": gen_cfg.get("controlnet_mode", "pose"),
+            "cache_dir": cache_dir or "/local_disk0/hf_cache",
+            "hf_token": hf_token or os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN"),
+            "face_model_name": gen_cfg.get("face_model_name", "antelopev2"),
+            "pulid_src": pulid_src,
+        }
+
+        if not ray.is_initialized():
+            ray.init(ignore_reinit_error=True)
+        n_avail = int(ray.cluster_resources().get("GPU", 0))
+        if n_avail < num_actors:
+            logger.warning(
+                f"Requested {num_actors} Ray actors but only {n_avail} GPUs available — "
+                f"reducing to {n_avail}."
+            )
+            num_actors = max(1, n_avail)
+
+        manifest_path = generated_dir / "incremental_manifest.jsonl"
+
+        all_results = list(
+            run_distributed(
+                requests=requests,
+                output_dir=str(generated_dir),
+                num_actors=num_actors,
+                actor_kwargs=actor_kwargs,
+                manifest_path=str(manifest_path),
+            )
+        )
+    else:
+        raise ValueError(f"Unknown backend: {backend}")
 
     output_index = generated_dir / "manifest.parquet"
     pd.DataFrame(all_results).to_parquet(output_index)
     manifest.finish()
     manifest.write(generated_dir / "run_manifest.json")
     logger.info(f"Generated {len(all_results)} images. Manifest: {output_index}")
+
+
+def _seed_to_request(seed: dict, cfg, gen_cfg) -> GenerationRequest:
+    return GenerationRequest(
+        seed_identity_id=seed["id"],
+        seed_image_path=seed["image_path"],
+        seed_prompt=None,
+        counterfactual_axes=cfg["counterfactual_axes"],
+        fixed_attributes=cfg.get("fixed_attributes", {}),
+        seed=cfg.get("seed", 42),
+        num_inference_steps=gen_cfg.get("num_inference_steps", 28),
+        guidance_scale=gen_cfg.get("guidance_scale", 3.5),
+        width=gen_cfg.get("width", 1024),
+        height=gen_cfg.get("height", 1024),
+    )
 
 
 def _load_seed_identities(cfg) -> list[dict]:

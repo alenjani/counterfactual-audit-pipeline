@@ -339,9 +339,50 @@ class FluxPuLIDControlNetGenerator(CounterfactualGenerator):
     ) -> list[GenerationResult]:
         import torch
 
-        self._lazy_load()
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Skip-if-exists pre-pass: build the full counterfactual list, partition into
+        # already-generated vs missing. If everything's already there, return without
+        # touching the model (cheap reruns of partial jobs).
+        axes = request.counterfactual_axes
+        keys = list(axes.keys())
+        all_combos = list(itertools.product(*[axes[k] for k in keys]))
+
+        existing_results: list[GenerationResult] = []
+        missing: list[tuple] = []
+        for combo in all_combos:
+            axis_values = dict(zip(keys, combo))
+            counterfactual_id = self._make_id(request.seed_identity_id, axis_values)
+            image_path = output_dir / f"{counterfactual_id}.png"
+            if image_path.exists():
+                existing_results.append(
+                    GenerationResult(
+                        seed_identity_id=request.seed_identity_id,
+                        counterfactual_id=counterfactual_id,
+                        image_path=str(image_path),
+                        prompt_used="",  # not regenerated; manifest can recover from prior run
+                        axis_values=axis_values,
+                        metadata={"skipped": True, "reason": "image_exists"},
+                    )
+                )
+            else:
+                missing.append(combo)
+
+        if not missing:
+            logger.info(
+                f"All {len(all_combos)} counterfactuals for {request.seed_identity_id} "
+                f"already exist in {output_dir}; skipping load."
+            )
+            return existing_results
+
+        if existing_results:
+            logger.info(
+                f"{request.seed_identity_id}: {len(existing_results)}/{len(all_combos)} "
+                f"already generated; producing {len(missing)} missing."
+            )
+
+        self._lazy_load()
 
         seed_img = Image.open(request.seed_image_path).convert("RGB") if request.seed_image_path else None
         control_image = self._build_control_image(seed_img) if seed_img is not None else None
@@ -350,11 +391,9 @@ class FluxPuLIDControlNetGenerator(CounterfactualGenerator):
         if self.identity_path != "none" and request.seed_image_path:
             id_embedding = self._extract_id_embedding(request.seed_image_path)
 
-        results: list[GenerationResult] = []
-        axes = request.counterfactual_axes
-        keys = list(axes.keys())
+        results: list[GenerationResult] = list(existing_results)
 
-        for combo in itertools.product(*[axes[k] for k in keys]):
+        for combo in missing:
             axis_values = dict(zip(keys, combo))
             prompt = build_demographic_prompt(
                 base_attributes=request.fixed_attributes,

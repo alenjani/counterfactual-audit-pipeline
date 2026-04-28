@@ -1,23 +1,35 @@
 # MVP run — small-scale validation that the full pipeline works end-to-end.
 # 50 seed identities × 12 counterfactual variations (6 skin tones × 2 genders) = 600 images.
 # 1 auditor (DeepFace, free + local) for fastest iteration.
-# Expected runtime on L4: ~5-8 hours.
+#
+# Hardware target: 4× L4 GPUs on Databricks (cluster 6106-192556-lj0uddmy)
+# Expected runtime: ~75 min on 4 actors (warm Volume cache), ~3-5 hr on 1 GPU.
+#
+# Validated against the smoke notebook (notebooks/01_databricks_ray_smoke.ipynb)
+# on 2026-04-28: NF4 + Flux + ControlNet + PuLID + antelopev2 + 1024² fits the L4.
 
 run_id: mvp_${env:USER}_${date:%Y%m%d}
 seed: 42
 
 paths:
+  # Volume-backed paths (CLAUDE.md storage tier "working storage").
+  # FairFace seed dataset still local-disk; small (~2 GB).
   seed_dataset: data/fairface
-  output_dir: outputs/mvp
-  generated_dir: outputs/mvp/generated
-  audit_dir: outputs/mvp/audit
-  analysis_dir: outputs/mvp/analysis
-  viz_dir: outputs/mvp/viz
+  output_dir: /Volumes/ds_work/alenj00/cap_cache/runs/mvp
+  generated_dir: /Volumes/ds_work/alenj00/cap_cache/runs/mvp/generated
+  audit_dir: /Volumes/ds_work/alenj00/cap_cache/runs/mvp/audit
+  analysis_dir: /Volumes/ds_work/alenj00/cap_cache/runs/mvp/analysis
+  viz_dir: /Volumes/ds_work/alenj00/cap_cache/runs/mvp/viz
 
 generator:
   backend: flux_pulid_controlnet
   device: cuda
-  dtype: fp8                       # FP8 for L4 (24GB VRAM)
+  dtype: nf4                         # NF4 fits the full pipeline on a 24 GB L4.
+                                     # FP8 OOMs at 1024². Per CLAUDE.md item 4.
+  controlnet_mode: pose              # required; canny/depth would confound
+                                     # demographic-correlated edges.
+  face_model_name: antelopev2        # ArcFace r100 + WebFace42M; required for
+                                     # tight identity-preservation measurement.
   num_inference_steps: 28
   guidance_scale: 3.5
   width: 1024
