@@ -61,6 +61,79 @@ _CONTROLNET_UNION_MODE_INDEX = {
 }
 
 
+def _ensure_antelopev2(insightface_root: str) -> None:
+    """Pre-stage InsightFace antelopev2 model files at <root>/models/antelopev2/.
+
+    Why this exists: InsightFace's built-in auto-download silently fails in
+    some environments (egress restrictions on its GitHub release URL, partial
+    extracts that pass FaceAnalysis's assertion-only validation). We explicitly
+    download the antelopev2 zip and extract it ourselves, with a HuggingFace
+    mirror fallback so this works on locked-down clusters.
+
+    antelopev2 is the higher-fidelity InsightFace pack (ArcFace ResNet-100 vs
+    ResNet-50, WebFace42M training data) — required for the identity-preservation
+    measurements that back CAP's statistical claims. See CLAUDE.md item 2.
+    """
+    import urllib.request
+    import zipfile
+
+    target_dir = Path(insightface_root) / "models" / "antelopev2"
+    sentinel = target_dir / "scrfd_10g_bnkps.onnx"
+    if sentinel.exists():
+        logger.info(f"antelopev2 already present at {target_dir}")
+        return
+
+    parent = target_dir.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    zip_path = parent / "antelopev2.zip"
+
+    sources = [
+        ("github_release", "https://github.com/deepinsight/insightface/releases/download/v0.7/antelopev2.zip"),
+        ("hf_mirror_monstermmorpg", "https://huggingface.co/MonsterMMORPG/tools/resolve/main/antelopev2.zip"),
+    ]
+
+    last_err: Exception | None = None
+    for name, url in sources:
+        try:
+            logger.info(f"Downloading antelopev2 from {name}: {url}")
+            urllib.request.urlretrieve(url, zip_path)
+            break
+        except Exception as e:
+            logger.warning(f"antelopev2 source {name} failed: {e}")
+            last_err = e
+    else:
+        raise RuntimeError(
+            f"All antelopev2 sources failed; last error: {last_err}. "
+            "Add another mirror to _ensure_antelopev2 or pre-stage the files manually."
+        )
+
+    # Extract. antelopev2.zip from the upstream release contains a top-level
+    # `antelopev2/` folder; some HF mirrors host the files at the zip root.
+    # Handle both layouts.
+    with zipfile.ZipFile(zip_path) as zf:
+        zf.extractall(parent)
+    zip_path.unlink()
+
+    # Locate scrfd_10g_bnkps.onnx wherever it landed and move all sibling files
+    # into target_dir so FaceAnalysis(name="antelopev2", root=...) finds them.
+    candidates = list(parent.rglob("scrfd_10g_bnkps.onnx"))
+    if not candidates:
+        raise RuntimeError(
+            f"antelopev2 zip extracted but scrfd_10g_bnkps.onnx not found under {parent}. "
+            "The mirror's archive layout is different than expected."
+        )
+    src_dir = candidates[0].parent
+    if src_dir.resolve() != target_dir.resolve():
+        target_dir.mkdir(parents=True, exist_ok=True)
+        for f in src_dir.iterdir():
+            f.rename(target_dir / f.name)
+        if src_dir.exists() and not any(src_dir.iterdir()):
+            src_dir.rmdir()
+
+    files = sorted(p.name for p in target_dir.iterdir())
+    logger.info(f"antelopev2 ready at {target_dir}: {files}")
+
+
 class FluxPuLIDControlNetGenerator(CounterfactualGenerator):
     def __init__(
         self,
@@ -179,6 +252,13 @@ class FluxPuLIDControlNetGenerator(CounterfactualGenerator):
 
         insightface_root = self.cache_dir or "/tmp/insightface_models"
         Path(insightface_root).mkdir(parents=True, exist_ok=True)
+
+        # antelopev2's auto-download fails on some clusters (egress block on
+        # InsightFace's GitHub release URL). Pre-stage the files explicitly via
+        # our own download (see _ensure_antelopev2). buffalo_l auto-downloads
+        # cleanly so it doesn't need this.
+        if self.face_model_name == "antelopev2":
+            _ensure_antelopev2(insightface_root)
 
         # Diagnostic: check what's in the model dir before FaceAnalysis tries to load.
         # If FaceAnalysis fails the 'detection' assertion, this tells us whether the
