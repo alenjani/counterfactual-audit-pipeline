@@ -120,7 +120,25 @@ Every run logs:
 - Auditee API versions where available
 - Full input → output manifest
 
-All artifacts written to GCS bucket under `runs/{run_id}/`.
+## Data storage & publication
+
+CAP run outputs sit in three tiers, each with a distinct role:
+
+| Tier | Where | Visibility |
+|---|---|---|
+| **Working storage** | Databricks Workspace Volume (`/Volumes/cap/runs/artifacts/`) — also hosts the HF model cache so Flux's 24 GB download survives cluster rebuilds | Private |
+| **Publication artifacts** | HuggingFace Datasets (e.g. `alenjani/cap-counterfactuals`) — generated images, audit predictions, manifest, packaged per run | **Private** during research → flip to **public** on paper acceptance (URL stable across the flip) |
+| **DOI / citation anchor** | Zenodo (mirrored from the HF Dataset on a release tag) | **Restricted-access** (embargoed DOI) at submission → **open access** on paper acceptance |
+
+This layout matches the canonical IS-paper workflow: reviewers see a registered DOI from submission onwards (Zenodo's embargoed-access feature), full data unlocks when the journal decision does, and downstream researchers get a one-line `load_dataset("alenjani/cap-counterfactuals")` interface.
+
+```python
+# Once paper is accepted and dataset is public:
+from datasets import load_dataset
+ds = load_dataset("alenjani/cap-counterfactuals", split="mvp")
+```
+
+> The earlier `configs/gcp.yaml` / `gcp/` paths predate this decision. They still work for direct GCE runs but **published artifacts go to HF + Zenodo, not GCS.** See `CLAUDE.md` for the full rationale.
 
 ## Papers using this pipeline
 
