@@ -61,11 +61,15 @@ class FairFaceLoader:
 
         logger.info(f"Loading FairFace index ({self.split} / {self.subset}) from {FAIRFACE_HF_REPO}")
         ds = load_dataset(FAIRFACE_HF_REPO, self.split, split=self.subset)
+        # `datasets.Dataset` is not dict-like — no .get(). Use column_names check.
+        service_test = (
+            ds["service_test"] if "service_test" in ds.column_names else [False] * len(ds)
+        )
         df = pd.DataFrame({
             "race": ds["race"],
             "gender": ds["gender"],
             "age": ds["age"],
-            "service_test": ds.get("service_test", [False] * len(ds)),
+            "service_test": service_test,
             "source_index": list(range(len(ds))),
         })
         # FairFace stores labels as ints; convert to strings if needed
