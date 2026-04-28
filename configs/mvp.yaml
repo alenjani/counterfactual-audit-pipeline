@@ -12,9 +12,11 @@ run_id: mvp_${env:USER}_${date:%Y%m%d}
 seed: 42
 
 paths:
-  # Volume-backed paths (CLAUDE.md storage tier "working storage").
-  # FairFace seed dataset still local-disk; small (~2 GB).
-  seed_dataset: data/fairface
+  # Volume-backed paths (CLAUDE.md storage tier "working storage"). Seed images
+  # MUST be on the Volume — Ray actors run on different worker nodes, so the
+  # driver's relative working dir is not visible to them. Volume paths are
+  # globally addressable from any node on the cluster.
+  seed_dataset: /Volumes/ds_work/alenj00/cap_cache/seeds/fairface
   output_dir: /Volumes/ds_work/alenj00/cap_cache/runs/mvp
   generated_dir: /Volumes/ds_work/alenj00/cap_cache/runs/mvp/generated
   audit_dir: /Volumes/ds_work/alenj00/cap_cache/runs/mvp/audit
