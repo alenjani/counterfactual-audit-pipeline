@@ -156,11 +156,19 @@ class FluxPuLIDControlNetGenerator(CounterfactualGenerator):
 
         self._control_processor = build_control_processor(self.controlnet_mode, device=self.device)
 
-        # Face embedding extractor (used by both PuLID and IP-Adapter paths)
+        # Face embedding extractor (used by both PuLID and IP-Adapter paths).
+        # Explicit `root` is required because insightface's default `~/.insightface/`
+        # is not consistently writable across environments (Databricks workers,
+        # ephemeral containers); a missing/empty model dir causes FaceAnalysis to
+        # init with an empty self.models and fail `assert 'detection' in self.models`.
         from insightface.app import FaceAnalysis
+
+        insightface_root = self.cache_dir or "/tmp/insightface_models"
+        Path(insightface_root).mkdir(parents=True, exist_ok=True)
 
         self._face_app = FaceAnalysis(
             name="antelopev2",
+            root=insightface_root,
             providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
         )
         self._face_app.prepare(ctx_id=0 if self.device == "cuda" else -1, det_size=(640, 640))
