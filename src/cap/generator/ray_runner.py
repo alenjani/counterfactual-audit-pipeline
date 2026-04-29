@@ -150,17 +150,21 @@ def run_distributed(
     pool = ActorPool(actors)
     request_dicts = [_request_to_dict(r) for r in requests]
 
-    manifest_file = open(manifest_path, "a") if manifest_path else None
-    try:
-        for batch in pool.map_unordered(
-            lambda actor, req: actor.generate.remote(req, output_dir),
-            request_dicts,
-        ):
-            for result in batch:
-                if manifest_file:
-                    manifest_file.write(json.dumps(result) + "\n")
-                    manifest_file.flush()
-                yield result
-    finally:
-        if manifest_file:
-            manifest_file.close()
+    # Open-append-close per write (instead of a persistent handle) — GCS-FUSE
+    # backed Volumes don't reliably support long-lived file handles across many
+    # flush()/close() ops, raising OSError 95 ("operation not supported").
+    # Per-write open is fine performance-wise: a few hundred small append writes
+    # over the lifetime of a multi-hour run.
+    def _append_manifest(result: dict) -> None:
+        if not manifest_path:
+            return
+        with open(manifest_path, "a") as f:
+            f.write(json.dumps(result) + "\n")
+
+    for batch in pool.map_unordered(
+        lambda actor, req: actor.generate.remote(req, output_dir),
+        request_dicts,
+    ):
+        for result in batch:
+            _append_manifest(result)
+            yield result
