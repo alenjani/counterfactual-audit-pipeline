@@ -126,7 +126,15 @@ def main(
             )
             num_actors = max(1, n_avail)
 
-        manifest_path = generated_dir / "incremental_manifest.jsonl"
+        # Stream the incremental manifest to /local_disk0 (driver-side) — the
+        # Volume's GCS-FUSE backing fails on file-append (Errno 95). The PNGs
+        # written by each actor (single-shot writes) ARE the durable source of
+        # truth, and skip-if-exists handles resume-from-crash regardless of
+        # whether the streaming manifest survived.
+        local_manifest = Path("/local_disk0/cap_mvp_manifest.jsonl")
+        local_manifest.parent.mkdir(parents=True, exist_ok=True)
+        if local_manifest.exists():
+            local_manifest.unlink()  # fresh file per run
 
         all_results = list(
             run_distributed(
@@ -134,9 +142,15 @@ def main(
                 output_dir=str(generated_dir),
                 num_actors=num_actors,
                 actor_kwargs=actor_kwargs,
-                manifest_path=str(manifest_path),
+                manifest_path=str(local_manifest),
             )
         )
+
+        # Copy the streaming manifest to the Volume at end (single-shot write).
+        try:
+            (generated_dir / "incremental_manifest.jsonl").write_bytes(local_manifest.read_bytes())
+        except Exception as e:
+            logger.warning(f"Manifest copy to Volume failed: {e}; PNGs + parquet still authoritative.")
     else:
         raise ValueError(f"Unknown backend: {backend}")
 
