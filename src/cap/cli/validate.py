@@ -117,9 +117,11 @@ def main(config_path: str, limit: int | None, face_model_name: str | None, cache
 
     manifest.finish()
     manifest.write(validation_dir / "run_manifest.json")
+    mcs = summary["mean_cosine_similarity"]
+    mcs_str = f"{mcs:.3f}" if mcs is not None else "n/a"
     logger.info(
         f"Validated {len(df)} pairs. "
-        f"Mean cosine sim: {summary['mean_cosine_similarity']:.3f if summary['mean_cosine_similarity'] is not None else 'n/a'}, "
+        f"Mean cosine sim: {mcs_str}, "
         f"fraction preserved (≥{threshold}): {summary['fraction_preserved']:.1%}. "
         f"Outputs: {validation_dir}"
     )
