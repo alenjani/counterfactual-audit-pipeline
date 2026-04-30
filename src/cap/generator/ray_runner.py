@@ -56,6 +56,9 @@ class FluxActor:
         os.environ["HF_HOME"] = cache_dir
         os.environ["HUGGINGFACE_HUB_CACHE"] = cache_dir
         os.environ["TRANSFORMERS_CACHE"] = cache_dir
+        # HF Hub's xet downloader fails on GCS-FUSE Volumes ("File too large,
+        # os error 27"). Force plain HTTP download until xet supports FUSE.
+        os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
         if hf_token:
             os.environ["HF_TOKEN"] = hf_token
             os.environ["HUGGING_FACE_HUB_TOKEN"] = hf_token
