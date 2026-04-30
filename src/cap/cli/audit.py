@@ -54,7 +54,12 @@ def main(config_path: str, limit: int | None) -> None:
                 })
 
     out_path = audit_dir / "predictions.parquet"
-    pd.DataFrame(rows).to_parquet(out_path)
+    df = pd.DataFrame(rows)
+    # Predictions span tasks with different return types — gender returns strings
+    # ("male"/"female"), age returns ints, etc. Coerce to string for Arrow's
+    # single-type-per-column requirement; downstream code can cast back per-task.
+    df["prediction"] = df["prediction"].astype(str)
+    df.to_parquet(out_path)
     manifest.finish()
     manifest.write(audit_dir / "run_manifest.json")
     logger.info(f"Wrote {len(rows)} audit predictions to {out_path}")
