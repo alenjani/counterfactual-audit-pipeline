@@ -300,7 +300,11 @@ class FluxPuLIDControlNetGenerator(CounterfactualGenerator):
             from pulid.pipeline_flux import PuLIDPipeline  # type: ignore
 
             self._pulid = PuLIDPipeline(self._pipeline, device=self.device)
-            self._pulid.load_pretrain(self.pulid_model_id)
+            # PuLID's load_pretrain takes pretrain_path (a local file path) as
+            # its first arg, NOT a HF repo id — the repo 'guozinan/PuLID' is
+            # hardcoded inside the library. Calling with no args uses defaults
+            # (downloads pulid_flux_v0.9.0.safetensors to ./models/ via HF Hub).
+            self._pulid.load_pretrain()
             logger.info("PuLID-Flux adapter loaded")
         except Exception as e:
             logger.error(
