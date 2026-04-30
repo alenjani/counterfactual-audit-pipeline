@@ -98,13 +98,16 @@ class FluxActor:
 
         request = GenerationRequest(**request_dict)
         results = self.generator.generate(request, output_dir)
+        # Flatten axis_values into per-axis columns to match the local backend's
+        # _result_to_dict shape. Otherwise downstream consumers (audit, analyze)
+        # see a dict column they can't groupby/filter on.
         return [
             {
                 "seed_identity_id": r.seed_identity_id,
                 "counterfactual_id": r.counterfactual_id,
                 "image_path": r.image_path,
                 "prompt_used": r.prompt_used,
-                "axis_values": r.axis_values,
+                **{f"axis_{k}": v for k, v in r.axis_values.items()},
                 "metadata": r.metadata,
             }
             for r in results
