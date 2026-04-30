@@ -25,10 +25,19 @@ class IdentityScore:
 
 
 class ArcFaceIdentityValidator:
-    def __init__(self, model_name: str = "buffalo_l", threshold: float = 0.5, device: str = "cuda"):
+    def __init__(
+        self,
+        model_name: str = "antelopev2",
+        threshold: float = 0.5,
+        device: str = "cuda",
+        root: str | None = None,
+    ):
         self.model_name = model_name
         self.threshold = threshold
         self.device = device
+        # Where InsightFace looks for / downloads the model pack. If not given,
+        # falls back to ~/.insightface (often unwritable on Databricks workers).
+        self.root = root
         self._app = None
 
     def _lazy_load(self) -> None:
@@ -36,7 +45,17 @@ class ArcFaceIdentityValidator:
             return
         from insightface.app import FaceAnalysis
 
-        self._app = FaceAnalysis(name=self.model_name, providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
+        # Pre-stage antelopev2 from a HF mirror if needed (auto-download from
+        # the InsightFace GitHub release URL is blocked on some clusters).
+        if self.root and self.model_name == "antelopev2":
+            from cap.generator.flux_pulid import _ensure_antelopev2
+
+            _ensure_antelopev2(self.root)
+
+        kwargs = {"providers": ["CUDAExecutionProvider", "CPUExecutionProvider"]}
+        if self.root:
+            kwargs["root"] = self.root
+        self._app = FaceAnalysis(name=self.model_name, **kwargs)
         self._app.prepare(ctx_id=0 if self.device == "cuda" else -1, det_size=(640, 640))
 
     def embed(self, image_path: str | Path) -> np.ndarray | None:

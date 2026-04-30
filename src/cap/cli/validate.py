@@ -11,6 +11,7 @@ joined back to the generation manifest).
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import click
@@ -32,7 +33,12 @@ logger = get_logger()
     default=None,
     help="InsightFace model pack for the identity validator (default: from config or 'antelopev2')",
 )
-def main(config_path: str, limit: int | None, face_model_name: str | None) -> None:
+@click.option(
+    "--cache-dir",
+    default=None,
+    help="Root for InsightFace model pack (auto-staged here if missing). Default: HF cache dir.",
+)
+def main(config_path: str, limit: int | None, face_model_name: str | None, cache_dir: str | None) -> None:
     cfg = load_config(config_path)
 
     # Validation outputs go to runs/<id>/validation/ — mirror the audit/analysis layout.
@@ -67,8 +73,13 @@ def main(config_path: str, limit: int | None, face_model_name: str | None) -> No
     val_cfg = cfg.get("validators", {}).get("identity", {})
     threshold = float(val_cfg.get("threshold", 0.5))
     model_name = face_model_name or cfg.get("generator.face_model_name", "antelopev2")
+    insightface_root = cache_dir or os.environ.get("HF_HOME") or "/local_disk0/hf_cache"
 
-    validator = ArcFaceIdentityValidator(model_name=model_name, threshold=threshold)
+    validator = ArcFaceIdentityValidator(
+        model_name=model_name,
+        threshold=threshold,
+        root=insightface_root,
+    )
 
     rows = []
     for _, row in tqdm(image_index.iterrows(), total=len(image_index)):
