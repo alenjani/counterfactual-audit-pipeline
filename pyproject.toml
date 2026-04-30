@@ -100,6 +100,7 @@ dev = [
 
 [project.scripts]
 cap-generate = "cap.cli.generate:main"
+cap-validate = "cap.cli.validate:main"
 cap-audit = "cap.cli.audit:main"
 cap-analyze = "cap.cli.analyze:main"
 cap-visualize = "cap.cli.visualize:main"

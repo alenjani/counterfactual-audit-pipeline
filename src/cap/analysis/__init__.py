@@ -1,5 +1,6 @@
 from cap.analysis.fairness_metrics import (
     counterfactual_flip_rate,
+    pairwise_flip_rate,
     subgroup_error_rates,
     intersectional_error_table,
 )
@@ -13,6 +14,7 @@ from cap.analysis.statistical_tests import (
 
 __all__ = [
     "counterfactual_flip_rate",
+    "pairwise_flip_rate",
     "subgroup_error_rates",
     "intersectional_error_table",
     "two_way_anova",

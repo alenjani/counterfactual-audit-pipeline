@@ -19,6 +19,7 @@ paths:
   seed_dataset: /Volumes/ds_work/alenj00/cap_cache/seeds/fairface
   output_dir: /Volumes/ds_work/alenj00/cap_cache/runs/mvp
   generated_dir: /Volumes/ds_work/alenj00/cap_cache/runs/mvp/generated
+  validation_dir: /Volumes/ds_work/alenj00/cap_cache/runs/mvp/validation
   audit_dir: /Volumes/ds_work/alenj00/cap_cache/runs/mvp/audit
   analysis_dir: /Volumes/ds_work/alenj00/cap_cache/runs/mvp/analysis
   viz_dir: /Volumes/ds_work/alenj00/cap_cache/runs/mvp/viz

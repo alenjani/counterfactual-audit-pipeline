@@ -15,6 +15,9 @@ def counterfactual_flip_rate(
     A "flip" = predictions differ across counterfactuals of the same identity.
     Flip rate = #identities with ≥1 flip / total identities.
     Optionally compute per-group within `group_cols`.
+
+    NOTE: this is a coarse 0/1 indicator. For effect-size measurement use
+    `pairwise_flip_rate` (fraction of pair comparisons that disagree).
     """
     if group_cols is None:
         flips = df.groupby(identity_col)[prediction_col].nunique() > 1
@@ -23,6 +26,40 @@ def counterfactual_flip_rate(
     flips = df.groupby([identity_col, *group_cols])[prediction_col].nunique() > 1
     rate = flips.groupby(group_cols).mean().reset_index(name="flip_rate")
     return rate
+
+
+def pairwise_flip_rate(
+    df: pd.DataFrame,
+    identity_col: str = "seed_identity_id",
+    prediction_col: str = "prediction",
+) -> pd.DataFrame:
+    """Per-identity fraction of pair-comparisons whose predictions disagree.
+
+    For each seed identity with N counterfactuals, compute (number of disagreeing
+    unordered pairs) / (N choose 2). Returns one row per identity with the rate.
+    Aggregating across identities (mean) gives the overall pairwise flip rate —
+    the effect size the paper measures (per H2 in the README).
+    """
+    rows = []
+    for ident, group in df.groupby(identity_col):
+        preds = group[prediction_col].tolist()
+        n = len(preds)
+        if n < 2:
+            continue
+        n_pairs = n * (n - 1) // 2
+        n_disagree = 0
+        for i in range(n):
+            for j in range(i + 1, n):
+                if preds[i] != preds[j]:
+                    n_disagree += 1
+        rows.append({
+            identity_col: ident,
+            "n_counterfactuals": n,
+            "n_pairs": n_pairs,
+            "n_disagree": n_disagree,
+            "pairwise_flip_rate": n_disagree / n_pairs,
+        })
+    return pd.DataFrame(rows)
 
 
 def subgroup_error_rates(
