@@ -1,0 +1,3 @@
+auditor,task,coarse_flip_rate,n_identities
+deepface,age,1.0,50
+deepface,gender,1.0,50

@@ -1,0 +1,100 @@
+{
+  "run_id": "mvp_${env:USER}_${date:%Y%m%d}_audit",
+  "config_path": "/Workspace/Users/alenj00@safeway.com/counterfactual-audit-pipeline/configs/mvp.yaml",
+  "config_resolved": {
+    "run_id": "mvp_${env:USER}_${date:%Y%m%d}",
+    "seed": 42,
+    "paths": {
+      "seed_dataset": "/Volumes/ds_work/alenj00/cap_cache/seeds/fairface",
+      "output_dir": "/Volumes/ds_work/alenj00/cap_cache/runs/mvp",
+      "generated_dir": "/Volumes/ds_work/alenj00/cap_cache/runs/mvp/generated",
+      "audit_dir": "/Volumes/ds_work/alenj00/cap_cache/runs/mvp/audit",
+      "analysis_dir": "/Volumes/ds_work/alenj00/cap_cache/runs/mvp/analysis",
+      "viz_dir": "/Volumes/ds_work/alenj00/cap_cache/runs/mvp/viz"
+    },
+    "generator": {
+      "backend": "flux_pulid_controlnet",
+      "device": "cuda",
+      "dtype": "nf4",
+      "controlnet_mode": "pose",
+      "face_model_name": "antelopev2",
+      "num_inference_steps": 28,
+      "guidance_scale": 3.5,
+      "width": 1024,
+      "height": 1024
+    },
+    "seed_identities": {
+      "source": "fairface",
+      "count": 50,
+      "stratify_by": [
+        "race",
+        "gender",
+        "age"
+      ]
+    },
+    "counterfactual_axes": {
+      "skin_tone": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6
+      ],
+      "gender": [
+        "male",
+        "female"
+      ]
+    },
+    "fixed_attributes": {
+      "pose": "frontal",
+      "expression": "neutral expression",
+      "lighting": "soft even studio lighting"
+    },
+    "validators": {
+      "identity": {
+        "enabled": true,
+        "threshold": 0.5
+      },
+      "fid": {
+        "enabled": false
+      },
+      "attributes": {
+        "enabled": true
+      }
+    },
+    "auditors": [
+      {
+        "name": "deepface",
+        "kwargs": {
+          "detector_backend": "retinaface"
+        }
+      }
+    ],
+    "tasks": [
+      "gender",
+      "age"
+    ],
+    "analysis": {
+      "fdr_alpha": 0.05,
+      "bootstrap_iters": 1000
+    },
+    "viz": {
+      "formats": [
+        "pdf",
+        "png"
+      ],
+      "dpi": 300,
+      "build_interactive_dashboard": true
+    }
+  },
+  "git_commit": null,
+  "git_dirty": false,
+  "started_at": "2026-04-30T00:05:06.864551+00:00",
+  "finished_at": "2026-04-30T00:09:07.695444+00:00",
+  "seeds": {},
+  "python_version": "3.12.3",
+  "platform": "Linux-6.8.0-1053-gcp-x86_64-with-glibc2.39",
+  "model_versions": {},
+  "notes": ""
+}

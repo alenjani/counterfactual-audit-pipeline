@@ -1,0 +1,54 @@
+{
+  "fdr_alpha": 0.05,
+  "flip_rates": [
+    {
+      "auditor": "deepface",
+      "task": "age",
+      "coarse_flip_rate": 1.0,
+      "n_identities": 50
+    },
+    {
+      "auditor": "deepface",
+      "task": "gender",
+      "coarse_flip_rate": 1.0,
+      "n_identities": 50
+    }
+  ],
+  "pairwise_flip_rates": [
+    {
+      "auditor": "deepface",
+      "task": "age",
+      "mean_pairwise_flip_rate": 0.8451515151515153,
+      "median_pairwise_flip_rate": 0.8484848484848485,
+      "std_pairwise_flip_rate": 0.05478286134609795,
+      "n_identities": 50
+    },
+    {
+      "auditor": "deepface",
+      "task": "gender",
+      "mean_pairwise_flip_rate": 0.5403030303030303,
+      "median_pairwise_flip_rate": 0.5454545454545454,
+      "std_pairwise_flip_rate": 0.016656825114780064,
+      "n_identities": 50
+    }
+  ],
+  "h1_anova": [],
+  "h2_mcnemars": [
+    {
+      "auditor": "deepface",
+      "task": "gender",
+      "statistic": Infinity,
+      "pvalue": 0.0,
+      "n_pairs": 50,
+      "pvalue_fdr": 0.0,
+      "H2_supported": true
+    }
+  ],
+  "h3_ordinal_logit": [],
+  "identity": {
+    "mean_cosine_sim": -0.0036512202930485244,
+    "median_cosine_sim": -0.006570568308234215,
+    "preserved_fraction": 0.0,
+    "n": 600
+  }
+}

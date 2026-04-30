@@ -1,0 +1,9 @@
+{
+  "n_pairs": 600,
+  "n_preserved": 0,
+  "fraction_preserved": 0.0,
+  "mean_cosine_similarity": -0.0036512202930485244,
+  "median_cosine_similarity": -0.006570568308234215,
+  "threshold": 0.5,
+  "face_model_name": "antelopev2"
+}

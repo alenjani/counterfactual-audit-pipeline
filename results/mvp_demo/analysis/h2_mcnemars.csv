@@ -1,0 +1,2 @@
+auditor,task,statistic,pvalue,n_pairs,pvalue_fdr,H2_supported
+deepface,gender,inf,0.0,50,0.0,True
