@@ -32,6 +32,13 @@ dependencies = [
     "peft>=0.12",
     "optimum-quanto>=0.2",
     "controlnet-aux>=0.0.9",
+    # PuLID-Flux runtime deps (pulid.pipeline_flux pulls in eva_clip which
+    # imports these at module load). Without them, `from pulid.pipeline_flux
+    # import PuLIDPipeline` raises ModuleNotFoundError and the generator
+    # silently falls back to IP-Adapter — the MVP's preserved_fraction=0.0 bug.
+    "ftfy>=6.1",
+    "regex>=2023.0",
+    "torchsde>=0.2.5",
     # mediapipe pinned: controlnet_aux.mediapipe_face imports `mp.solutions.drawing_utils`
     # at module load; some recent mediapipe builds (incl. DBR 16.4 ML's bundled one) lack
     # that namespace and break the `pose` ControlNet preprocessor on import. Pin to a

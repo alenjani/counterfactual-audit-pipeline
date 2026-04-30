@@ -287,20 +287,34 @@ class FluxPuLIDControlNetGenerator(CounterfactualGenerator):
         logger.info(f"Pipeline loaded in {time.time() - t0:.1f}s")
 
     def _load_pulid(self) -> None:
-        """Load PuLID-Flux. Requires the PuLID package — install instructions in README."""
+        """Load PuLID-Flux. Requires the PuLID package — install instructions in README.
+
+        Per CLAUDE.md item 2, when identity_path="pulid" is requested explicitly the
+        generator must NOT silently fall back to IP-Adapter on failure. Such fallback
+        was the root cause of the MVP run's preserved_fraction=0.0 (PuLID's eva_clip
+        module needs ftfy/regex/torchsde, which weren't in cap's deps; the import
+        raised ModuleNotFoundError, the prior `except ImportError: ... self._load_ip_adapter()`
+        block swallowed it, and 600 images were generated with weak IP-Adapter).
+        """
         try:
             from pulid.pipeline_flux import PuLIDPipeline  # type: ignore
 
             self._pulid = PuLIDPipeline(self._pipeline, device=self.device)
             self._pulid.load_pretrain(self.pulid_model_id)
             logger.info("PuLID-Flux adapter loaded")
-        except ImportError:
-            logger.warning(
-                "PuLID package not installed — falling back to IP-Adapter FaceID for identity. "
-                "To enable PuLID: pip install git+https://github.com/ToTheBeginning/PuLID"
+        except Exception as e:
+            logger.error(
+                f"PuLID load FAILED ({type(e).__name__}: {e}). "
+                "Per CLAUDE.md item 2, refusing to silently fall back to IP-Adapter. "
+                "Common causes:\n"
+                "  - Missing transitive deps: pip install ftfy regex torchsde\n"
+                "  - PuLID source not on sys.path: clone https://github.com/ToTheBeginning/PuLID "
+                "and add it via sys.path or set the actor's pulid_src parameter\n"
+                "  - PuLID model weights not yet downloaded — check HF_TOKEN access to "
+                f"{self.pulid_model_id!r}\n"
+                "If you genuinely want IP-Adapter, set identity_path='ip_adapter' explicitly."
             )
-            self.identity_path = "ip_adapter"
-            self._load_ip_adapter()
+            raise
 
     def _load_ip_adapter(self) -> None:
         """Load IP-Adapter FaceID as identity-injection fallback."""
