@@ -115,25 +115,34 @@ def _import_pulid_flux():
 
 def _load_flux_quintized_low_peak(pulid_modules, name: str, device):
     """Drop-in replacement for PuLID's `load_flow_model_quintized` that avoids
-    a 24 GB CPU peak from materializing the BF16 Flux skeleton.
+    BOTH the 36 GB CPU peak (PuLID stock) AND the 24 GB GPU peak (optimum-
+    quanto stock requantize) when targeting a 22 GB L4.
 
-    PuLID's loader does:
-        model = Flux(params).to(torch.bfloat16)        # ~24 GB on CPU
-        sd    = load_sft(fp8_ckpt, device='cpu')        # +12 GB on CPU
-        requantize(model, sd, qmap, device=device)      # replaces in-place
-    Peak: ~36 GB CPU. On the g2-standard-16 driver (64 GB total, ~46 GB after
-    JVM/Spark overhead), this OOMs the kernel during the BF16 allocation.
+    The two stock paths' failure modes:
+      - PuLID's `load_flow_model_quintized`: builds a BF16 Flux skeleton on
+        CPU (~24 GB) then loads the FP8 state dict (~12 GB) on top → peak
+        ~36 GB CPU. Exceeds the ~27 GB usable on the g2-standard-16 driver
+        after Spark/JVM overhead → kernel OOM during init.
+      - optimum-quanto's `requantize`: materializes the BF16 model on CPU,
+        moves it to `device` (24 GB on the 22 GB GPU → CUDA OOM), then loads
+        the FP8 state dict (would have shrunk it to 12 GB, but never reached).
 
-    We use accelerate's `init_empty_weights()` to construct the Flux skeleton
-    on the `meta` device (no actual memory). `requantize` then materializes
-    parameters directly on `device` while consuming `sd`, so peak is just the
-    FP8 state dict (~12 GB).
+    Our path:
+      1. Build Flux skeleton on `meta` device (0 GB).
+      2. Replace Linear → QLinear via quanto's `_quantize_submodule` (still
+         meta, 0 GB).
+      3. Load FP8 state dict on CPU (~12 GB).
+      4. `load_state_dict(sd, assign=True)` swaps meta params with FP8
+         tensors directly — no BF16 intermediate.
+      5. `model.to(device)` moves the now-FP8 model to GPU (12 GB, fits).
+
+    Peak CPU: ~12 GB (state dict). Peak GPU: ~12 GB (final FP8 model).
     """
     import json
     import os
     from accelerate import init_empty_weights
     from huggingface_hub import hf_hub_download
-    from optimum.quanto import requantize
+    from optimum.quanto.quantize import _quantize_submodule
     from safetensors.torch import load_file as load_sft
 
     Flux = pulid_modules["Flux"]
@@ -148,19 +157,39 @@ def _load_flux_quintized_low_peak(pulid_modules, name: str, device):
         "XLabs-AI/flux-dev-fp8", "flux_dev_quantization_map.json"
     )
 
-    logger.info("Building Flux skeleton on meta device (no memory)...")
+    logger.info("Building Flux skeleton on meta device (0 GB)...")
     with init_empty_weights():
         model = Flux(configs[name].params)
 
-    logger.info(f"Loading FP8 checkpoint from {ckpt_path} (CPU)...")
-    sd = load_sft(ckpt_path, device="cpu")
     with open(json_path) as f:
         quantization_map = json.load(f)
 
-    logger.info(f"Requantizing to {device}...")
-    requantize(model, sd, quantization_map, device=device)
+    # Replace Linear → QLinear in-place (still meta, no memory).
+    for mod_name, m in model.named_modules():
+        qconfig = quantization_map.get(mod_name)
+        if qconfig is not None:
+            weights = None if qconfig["weights"] == "none" else qconfig["weights"]
+            activations = None if qconfig["activations"] == "none" else qconfig["activations"]
+            _quantize_submodule(model, mod_name, m, weights=weights, activations=activations)
+    logger.info("QLinear modules installed (meta).")
+
+    logger.info(f"Loading FP8 state dict from {ckpt_path} (CPU)...")
+    sd = load_sft(ckpt_path, device="cpu")
+
+    # assign=True replaces meta params with the FP8 tensors directly. This is
+    # the critical step: stock requantize does this AFTER moving the (still
+    # BF16) model to GPU, which OOMs. We do it BEFORE the move.
+    logger.info("Assigning FP8 weights to meta params (no BF16 intermediate)...")
+    missing, unexpected = model.load_state_dict(sd, strict=False, assign=True)
+    if missing:
+        logger.warning(f"  load_state_dict missing keys: {len(missing)} (first 3: {missing[:3]})")
+    if unexpected:
+        logger.warning(f"  load_state_dict unexpected keys: {len(unexpected)} (first 3: {unexpected[:3]})")
     del sd
     gc.collect()
+
+    logger.info(f"Moving FP8 Flux to {device}...")
+    model.to(device)
     return model
 
 
