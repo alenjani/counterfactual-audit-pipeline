@@ -85,6 +85,7 @@ def _import_pulid_flux():
             load_ae,
             load_clip,
             load_flow_model,
+            load_flow_model_quintized,
             load_t5,
         )
         from pulid.pipeline_flux import PuLIDPipeline  # type: ignore
@@ -104,118 +105,108 @@ def _import_pulid_flux():
         "load_ae": load_ae,
         "load_clip": load_clip,
         "load_flow_model": load_flow_model,
+        "load_flow_model_quintized": load_flow_model_quintized,
         "load_t5": load_t5,
         "PuLIDPipeline": PuLIDPipeline,
     }
 
 
-# ----------------------------- extended Flux model with ControlNet residuals
+# --------------------------- forward extension via monkey-patch (no subclass)
+#
+# Earlier draft built a `FluxWithControlNet(Flux)` subclass and copied weights
+# from a PuLID-loaded baseline into a fresh subclass instance. That doubles
+# peak VRAM during construction (~48 GB) and OOMs the L4. Instead we monkey-
+# patch the forward method on the *already-loaded* Flux instance — the model
+# keeps its weights in place, only its forward is replaced. Peak VRAM stays
+# at one model's worth (~24 GB BF16, less for quantized).
 
-def _make_flux_with_controlnet_class():
-    """Factory: build a Flux subclass at import time once PuLID's Flux is on sys.path.
+def _patch_flux_forward_for_controlnet(flux_module, timestep_embedding):
+    """Replace `flux_module.forward` with a closure that applies BOTH PuLID's
+    pulid_ca modulations AND diffusers-format ControlNet block residuals.
 
-    Returns the FluxWithControlNet class. We can't define it at module import
-    because PuLID's `flux.model.Flux` is only resolvable after the caller sets
-    sys.path; defining a subclass at module top-level would fail.
+    The closure mirrors PuLID's flux/model.py forward exactly for the pulid_ca
+    insertions (every `pulid_double_interval` / `pulid_single_interval` blocks)
+    and adds ControlNet residual application after each block, matching
+    diffusers' FluxControlNetPipeline interval distribution.
     """
-    pulid = _import_pulid_flux()
-    Flux = pulid["Flux"]
-    timestep_embedding = pulid["timestep_embedding"]
+    import types
 
-    class FluxWithControlNet(Flux):
-        """PuLID's Flux + ControlNet residual application.
+    def extended_forward(
+        self,
+        img: Tensor,
+        img_ids: Tensor,
+        txt: Tensor,
+        txt_ids: Tensor,
+        timesteps: Tensor,
+        y: Tensor,
+        guidance: Tensor = None,
+        id: Tensor = None,
+        id_weight: float = 1.0,
+        controlnet_block_samples: list[Tensor] | None = None,
+        controlnet_single_block_samples: list[Tensor] | None = None,
+        aggressive_offload: bool = False,
+    ) -> Tensor:
+        if img.ndim != 3 or txt.ndim != 3:
+            raise ValueError("Input img and txt tensors must have 3 dimensions.")
 
-        Forward is copied from PuLID's flux/model.py with two additions:
+        img = self.img_in(img)
+        vec = self.time_in(timestep_embedding(timesteps, 256))
+        if self.params.guidance_embed:
+            if guidance is None:
+                raise ValueError("Didn't get guidance strength for guidance distilled model.")
+            vec = vec + self.guidance_in(timestep_embedding(guidance, 256))
+        vec = vec + self.vector_in(y)
+        txt = self.txt_in(txt)
 
-          1. After each double_block(i), if controlnet_block_samples is
-             provided, add residual `controlnet_block_samples[i // interval]`.
-             This matches diffusers' FluxControlNet residual injection.
-          2. After each single_block(i), apply controlnet_single_block_samples
-             with the same interval logic.
+        ids = torch.cat((txt_ids, img_ids), dim=1)
+        pe = self.pe_embedder(ids)
 
-        PuLID's existing `pulid_ca` modulations remain in place at their
-        original intervals (every `pulid_double_interval` / `pulid_single_interval`
-        blocks) — both effects compose.
-        """
+        cn_double_interval = (
+            int(math.ceil(len(self.double_blocks) / len(controlnet_block_samples)))
+            if controlnet_block_samples
+            else None
+        )
+        cn_single_interval = (
+            int(math.ceil(len(self.single_blocks) / len(controlnet_single_block_samples)))
+            if controlnet_single_block_samples
+            else None
+        )
 
-        def forward(
-            self,
-            img: Tensor,
-            img_ids: Tensor,
-            txt: Tensor,
-            txt_ids: Tensor,
-            timesteps: Tensor,
-            y: Tensor,
-            guidance: Tensor = None,
-            id: Tensor = None,
-            id_weight: float = 1.0,
-            controlnet_block_samples: list[Tensor] | None = None,
-            controlnet_single_block_samples: list[Tensor] | None = None,
-            aggressive_offload: bool = False,
-        ) -> Tensor:
-            if img.ndim != 3 or txt.ndim != 3:
-                raise ValueError("Input img and txt tensors must have 3 dimensions.")
+        ca_idx = 0
+        for i, block in enumerate(self.double_blocks):
+            img, txt = block(img=img, txt=txt, vec=vec, pe=pe)
 
-            img = self.img_in(img)
-            vec = self.time_in(timestep_embedding(timesteps, 256))
-            if self.params.guidance_embed:
-                if guidance is None:
-                    raise ValueError("Didn't get guidance strength for guidance distilled model.")
-                vec = vec + self.guidance_in(timestep_embedding(guidance, 256))
-            vec = vec + self.vector_in(y)
-            txt = self.txt_in(txt)
+            if cn_double_interval is not None:
+                j = i // cn_double_interval
+                if j < len(controlnet_block_samples):
+                    img = img + controlnet_block_samples[j]
 
-            ids = torch.cat((txt_ids, img_ids), dim=1)
-            pe = self.pe_embedder(ids)
+            if i % self.pulid_double_interval == 0 and id is not None:
+                img = img + id_weight * self.pulid_ca[ca_idx](id, img)
+                ca_idx += 1
 
-            # Match diffusers' interval-based residual distribution: ControlNet
-            # may have fewer layers than the Flux DiT, so each residual gets
-            # applied across `interval` consecutive blocks.
-            cn_double_interval = (
-                int(math.ceil(len(self.double_blocks) / len(controlnet_block_samples)))
-                if controlnet_block_samples
-                else None
-            )
-            cn_single_interval = (
-                int(math.ceil(len(self.single_blocks) / len(controlnet_single_block_samples)))
-                if controlnet_single_block_samples
-                else None
-            )
+        img = torch.cat((txt, img), 1)
+        for i, block in enumerate(self.single_blocks):
+            x = block(img, vec=vec, pe=pe)
+            real_img, txt = x[:, txt.shape[1]:, ...], x[:, :txt.shape[1], ...]
 
-            ca_idx = 0
-            for i, block in enumerate(self.double_blocks):
-                img, txt = block(img=img, txt=txt, vec=vec, pe=pe)
+            if cn_single_interval is not None:
+                j = i // cn_single_interval
+                if j < len(controlnet_single_block_samples):
+                    real_img = real_img + controlnet_single_block_samples[j]
 
-                if cn_double_interval is not None:
-                    j = i // cn_double_interval
-                    if j < len(controlnet_block_samples):
-                        img = img + controlnet_block_samples[j]
+            if i % self.pulid_single_interval == 0 and id is not None:
+                real_img = real_img + id_weight * self.pulid_ca[ca_idx](id, real_img)
+                ca_idx += 1
 
-                if i % self.pulid_double_interval == 0 and id is not None:
-                    img = img + id_weight * self.pulid_ca[ca_idx](id, img)
-                    ca_idx += 1
+            img = torch.cat((txt, real_img), 1)
 
-            img = torch.cat((txt, img), 1)
-            for i, block in enumerate(self.single_blocks):
-                x = block(img, vec=vec, pe=pe)
-                real_img, txt = x[:, txt.shape[1]:, ...], x[:, :txt.shape[1], ...]
+        img = img[:, txt.shape[1]:, ...]
+        img = self.final_layer(img, vec)
+        return img
 
-                if cn_single_interval is not None:
-                    j = i // cn_single_interval
-                    if j < len(controlnet_single_block_samples):
-                        real_img = real_img + controlnet_single_block_samples[j]
-
-                if i % self.pulid_single_interval == 0 and id is not None:
-                    real_img = real_img + id_weight * self.pulid_ca[ca_idx](id, real_img)
-                    ca_idx += 1
-
-                img = torch.cat((txt, real_img), 1)
-
-            img = img[:, txt.shape[1]:, ...]
-            img = self.final_layer(img, vec)
-            return img
-
-    return FluxWithControlNet
+    flux_module.forward = types.MethodType(extended_forward, flux_module)
+    return flux_module
 
 
 # ---------------------------------------------- ControlNet residuals from a control image
@@ -292,6 +283,7 @@ class FluxPuLIDNativeGenerator(CounterfactualGenerator):
         controlnet_conditioning_scale: float = 0.6,
         weight_dtype: torch.dtype = torch.bfloat16,
         offload: bool = False,
+        use_fp8: bool = True,
     ):
         self.flux_model_name = flux_model_name
         self.controlnet_model_id = controlnet_model_id
@@ -303,6 +295,10 @@ class FluxPuLIDNativeGenerator(CounterfactualGenerator):
         self.controlnet_conditioning_scale = controlnet_conditioning_scale
         self.weight_dtype = weight_dtype
         self.offload = offload
+        # FP8 quantization is required to fit Flux + ControlNet + T5 on a 24 GB L4.
+        # PuLID's `load_flow_model_quintized` produces FP8 weights (~12 GB) instead
+        # of BF16 (~24 GB). Disable only if running on an A100/H100 with headroom.
+        self.use_fp8 = use_fp8
 
         # Lazily-loaded
         self._flux: Any = None
@@ -321,28 +317,26 @@ class FluxPuLIDNativeGenerator(CounterfactualGenerator):
             return
 
         self._pulid_modules = _import_pulid_flux()
-        FluxWithControlNet = _make_flux_with_controlnet_class()
 
-        # ---- Flux DiT (PuLID's loader, but instantiate our subclass) ------
-        # PuLID's `load_flow_model` returns a `Flux` instance with weights loaded.
-        # We instantiate `FluxWithControlNet` instead and copy the state dict.
-        logger.info(f"Loading Flux ({self.flux_model_name}) via PuLID's loader...")
+        # ---- Flux DiT (PuLID's loader, then monkey-patch its forward) -----
+        # Use PuLID's `load_flow_model` to get a Flux instance with weights
+        # already loaded; replace its forward in-place to honor ControlNet
+        # residuals while preserving PuLID's pulid_ca insertions.
+        # Avoids the double-instantiation that OOMs on a 24 GB L4 BF16.
+        loader_key = "load_flow_model_quintized" if self.use_fp8 else "load_flow_model"
+        logger.info(f"Loading Flux ({self.flux_model_name}, use_fp8={self.use_fp8}) via PuLID's {loader_key}...")
         t0 = time.time()
-        baseline = self._pulid_modules["load_flow_model"](
+        self._flux = self._pulid_modules[loader_key](
             self.flux_model_name,
             device="cpu" if self.offload else self.device,
         )
-        # Build our subclass with the same params and copy weights.
-        self._flux = FluxWithControlNet(baseline.params).to(
-            "cpu" if self.offload else self.device,
-            self.weight_dtype,
+        _patch_flux_forward_for_controlnet(
+            self._flux, self._pulid_modules["timestep_embedding"]
         )
-        self._flux.load_state_dict(baseline.state_dict(), strict=True)
         self._flux.eval()
-        del baseline
         gc.collect()
         torch.cuda.empty_cache()
-        logger.info(f"Flux DiT loaded in {time.time() - t0:.1f}s")
+        logger.info(f"Flux DiT loaded + forward patched in {time.time() - t0:.1f}s")
 
         # ---- T5 / CLIP / AE ----------------------------------------------
         t0 = time.time()
@@ -600,5 +594,6 @@ class FluxPuLIDNativeGenerator(CounterfactualGenerator):
             "controlnet_conditioning_scale": str(self.controlnet_conditioning_scale),
             "face_model": self.face_model_name,
             "weight_dtype": str(self.weight_dtype).replace("torch.", ""),
+            "use_fp8": str(self.use_fp8),
             "architecture": "pulid_native_with_controlnet",
         }
