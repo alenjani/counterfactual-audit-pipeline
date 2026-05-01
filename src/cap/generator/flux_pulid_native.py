@@ -338,15 +338,20 @@ class FluxPuLIDNativeGenerator(CounterfactualGenerator):
         torch.cuda.empty_cache()
         logger.info(f"Flux DiT loaded + forward patched in {time.time() - t0:.1f}s")
 
-        # ---- T5 / CLIP / AE ----------------------------------------------
+        # ---- T5 / CLIP / AE on CPU ---------------------------------------
+        # On a 22 GB-usable L4, simultaneously holding Flux (~12 GB FP8) +
+        # ControlNet (~6 GB BF16) + T5 (~5 GB BF16) overflows. T5 is only
+        # called once per generation (encode the prompt), and CLIP/AE are
+        # also one-shot per image. Keeping them on CPU saves ~5 GB of GPU
+        # while costing ~1-2s per generation for T5's CPU forward — fine.
         t0 = time.time()
-        self._t5 = self._pulid_modules["load_t5"](self.device, max_length=128)
-        self._clip = self._pulid_modules["load_clip"](self.device)
+        self._t5 = self._pulid_modules["load_t5"]("cpu", max_length=128)
+        self._clip = self._pulid_modules["load_clip"]("cpu")
         self._ae = self._pulid_modules["load_ae"](
             self.flux_model_name,
-            device="cpu" if self.offload else self.device,
+            device="cpu",
         )
-        logger.info(f"T5/CLIP/AE loaded in {time.time() - t0:.1f}s")
+        logger.info(f"T5/CLIP/AE loaded on CPU in {time.time() - t0:.1f}s")
 
         # ---- ControlNet (diffusers, just for the model & forward) --------
         t0 = time.time()
@@ -383,22 +388,24 @@ class FluxPuLIDNativeGenerator(CounterfactualGenerator):
         return self._control_processor(seed_image)
 
     def _encode_control_image(self, control_image: Image.Image, height: int, width: int) -> Tensor:
-        """Encode a PIL control image to the latent shape ControlNet expects."""
+        """Encode a PIL control image to the latent shape ControlNet expects.
+
+        AE lives on CPU (memory pressure on the L4); we encode there and move
+        the small latent to GPU.
+        """
         from torchvision import transforms
 
         tx = transforms.Compose([
             transforms.Resize((height, width), interpolation=transforms.InterpolationMode.BICUBIC),
             transforms.ToTensor(),
         ])
-        t = tx(control_image.convert("RGB")).unsqueeze(0).to(self.device, self.weight_dtype)
-        # Encode to latent space via the AE (matches FluxControlNetModel's expected input).
+        t = tx(control_image.convert("RGB")).unsqueeze(0)  # CPU, float32 [-1, 1] after scale
         with torch.no_grad():
-            latent = self._ae.encode(t * 2.0 - 1.0)  # [-1, 1] range
-        # diffusers' FluxControlNetModel expects packed latent [B, seq, C].
-        # Pack from [B, C, H/8, W/8] → [B, (H/16 * W/16), C*4].
+            latent = self._ae.encode(t * 2.0 - 1.0)  # AE on CPU
+        # Pack from [B, C, H/8, W/8] → [B, (H/16 * W/16), C*4] and move to GPU
         from einops import rearrange
         latent = rearrange(latent, "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=2, pw=2)
-        return latent
+        return latent.to(self.device, self.weight_dtype)
 
     @torch.inference_mode()
     def _denoise_with_controlnet(
@@ -420,19 +427,22 @@ class FluxPuLIDNativeGenerator(CounterfactualGenerator):
         unpack = self._pulid_modules["unpack"]
 
         torch.manual_seed(seed)
-        x = get_noise(1, height, width, device=self.device, dtype=self.weight_dtype, seed=seed)
+        # Noise on CPU initially (matches T5/CLIP); prepare runs on CPU; we
+        # move the prepared tensors to GPU before the denoise loop.
+        x = get_noise(1, height, width, device="cpu", dtype=self.weight_dtype, seed=seed)
         prep = prepare(t5=self._t5, clip=self._clip, img=x, prompt=prompt)
         timesteps = get_schedule(num_inference_steps, prep["img"].shape[1], shift=True)
 
-        guidance_vec = torch.full(
-            (prep["img"].shape[0],), guidance_scale, device=self.device, dtype=self.weight_dtype
-        )
+        # Move prepared tensors to GPU for the inference loop
+        img = prep["img"].to(self.device, self.weight_dtype)
+        img_ids = prep["img_ids"].to(self.device, self.weight_dtype)
+        txt = prep["txt"].to(self.device, self.weight_dtype)
+        txt_ids = prep["txt_ids"].to(self.device, self.weight_dtype)
+        vec = prep["vec"].to(self.device, self.weight_dtype)
 
-        img = prep["img"]
-        img_ids = prep["img_ids"]
-        txt = prep["txt"]
-        txt_ids = prep["txt_ids"]
-        vec = prep["vec"]
+        guidance_vec = torch.full(
+            (img.shape[0],), guidance_scale, device=self.device, dtype=self.weight_dtype
+        )
 
         for i, (t_curr, t_prev) in enumerate(zip(timesteps[:-1], timesteps[1:])):
             t_vec = torch.full((img.shape[0],), t_curr, dtype=self.weight_dtype, device=self.device)
@@ -466,9 +476,9 @@ class FluxPuLIDNativeGenerator(CounterfactualGenerator):
 
             img = img + (t_prev - t_curr) * pred
 
-        # Decode latent → image
-        img = unpack(img.float(), height, width)
-        with torch.autocast(device_type=self.device, dtype=self.weight_dtype):
+        # Decode latent → image. AE is on CPU; move final latent there.
+        img = unpack(img.float(), height, width).cpu()
+        with torch.no_grad():
             img = self._ae.decode(img)
         img = (img.clamp(-1, 1) + 1) / 2
         img = (img * 255).to(torch.uint8).cpu().numpy()[0].transpose(1, 2, 0)
