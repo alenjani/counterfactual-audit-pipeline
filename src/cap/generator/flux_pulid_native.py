@@ -334,7 +334,10 @@ def _compute_controlnet_residuals(
     out = controlnet(
         hidden_states=img,
         controlnet_cond=control_image_latent,
-        controlnet_mode=torch.tensor([controlnet_mode], device=img.device, dtype=torch.long),
+        # FluxControlNetPipeline reshapes control_mode to (B, 1) before passing
+        # to FluxControlNetModel — the embedder expects 2D input so its output
+        # is 3D and can be concatenated to encoder_hidden_states. We mirror it.
+        controlnet_mode=torch.tensor([[controlnet_mode]], device=img.device, dtype=torch.long),
         conditioning_scale=controlnet_conditioning_scale,
         encoder_hidden_states=txt,
         pooled_projections=vec,
