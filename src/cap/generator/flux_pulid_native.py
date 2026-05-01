@@ -173,6 +173,17 @@ def _load_flux_quintized_low_peak(pulid_modules, name: str, device):
             _quantize_submodule(model, mod_name, m, weights=weights, activations=activations)
     logger.info("QLinear modules installed (meta).")
 
+    # Disable quanto's Marlin-FP8 optimization. Marlin is a faster FP8 matmul
+    # kernel, but its packing step (per-layer) requires holding the original
+    # FP8 weight + a same-size int32 packed buffer + a transient int32 cast,
+    # peaking at ~3× weight size per layer on GPU. Cumulatively across 19+38
+    # Flux blocks, this exceeds the L4's 22 GB ceiling and OOMs at ~21.5 GB.
+    # Plain WeightQBytesTensor uses ~25-30% slower matmul but has flat memory.
+    # For our hardware it's the right trade.
+    from optimum.quanto.tensor.weights.qbytes import WeightQBytesTensor as _WQB
+    _WQB.optimize = lambda self: self  # type: ignore[method-assign]
+    logger.info("Marlin-FP8 optimization disabled (memory-friendly mode).")
+
     # Load FP8 weights DIRECTLY to the target device. safetensors can mmap-
     # load each tensor straight to CUDA, so the 12 GB state dict never lands
     # in host RAM. Critical because:
