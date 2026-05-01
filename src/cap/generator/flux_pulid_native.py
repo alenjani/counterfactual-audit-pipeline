@@ -453,6 +453,7 @@ class FluxPuLIDNativeGenerator(CounterfactualGenerator):
         )
         self._flux.eval()
         gc.collect()
+        torch.cuda.empty_cache()
         logger.info(f"Flux loaded + forward patched in {time.time() - t0:.1f}s")
 
         # BF16 path: now move to GPU (FP8 path already on target_device).
@@ -460,6 +461,7 @@ class FluxPuLIDNativeGenerator(CounterfactualGenerator):
             t0 = time.time()
             self._flux = self._flux.to(self.device)
             logger.info(f"Flux moved to {self.device} in {time.time() - t0:.1f}s")
+            gc.collect()
             torch.cuda.empty_cache()
 
         # ---- T5 / CLIP / AE on CPU ---------------------------------------
@@ -470,11 +472,15 @@ class FluxPuLIDNativeGenerator(CounterfactualGenerator):
         # while costing ~1-2s per generation for T5's CPU forward — fine.
         t0 = time.time()
         self._t5 = self._pulid_modules["load_t5"]("cpu", max_length=128)
+        gc.collect()
         self._clip = self._pulid_modules["load_clip"]("cpu")
+        gc.collect()
         self._ae = self._pulid_modules["load_ae"](
             self.flux_model_name,
             device="cpu",
         )
+        gc.collect()
+        torch.cuda.empty_cache()
         logger.info(f"T5/CLIP/AE loaded on CPU in {time.time() - t0:.1f}s")
 
         # ---- ControlNet (diffusers, FP8-quantized to fit on L4) ----------
@@ -501,6 +507,9 @@ class FluxPuLIDNativeGenerator(CounterfactualGenerator):
             freeze(cn)
             gc.collect()
         self._controlnet = cn.to(self.device)
+        del cn
+        gc.collect()
+        torch.cuda.empty_cache()
         logger.info(f"ControlNet loaded ({'FP8' if self.use_fp8 else 'BF16'}) in {time.time() - t0:.1f}s")
 
         # ---- PuLID identity pipeline (attaches pulid_ca to our flux) -----
@@ -512,6 +521,8 @@ class FluxPuLIDNativeGenerator(CounterfactualGenerator):
             weight_dtype=self.weight_dtype,
         )
         self._pulid.load_pretrain()
+        gc.collect()
+        torch.cuda.empty_cache()
         logger.info(f"PuLID adapter + face encoder loaded in {time.time() - t0:.1f}s")
 
         # ---- Structural preprocessor for the control image ---------------
