@@ -323,20 +323,32 @@ class FluxPuLIDNativeGenerator(CounterfactualGenerator):
         # already loaded; replace its forward in-place to honor ControlNet
         # residuals while preserving PuLID's pulid_ca insertions.
         # Avoids the double-instantiation that OOMs on a 24 GB L4 BF16.
+        # Load on CPU first regardless of target device. Reason: with use_fp8,
+        # PuLID's `load_flow_model_quintized` first builds a BF16 model and
+        # then quantizes in place. If we target GPU directly, peak GPU memory
+        # during quantization is ~24 GB (BF16) + ~12 GB (FP8) = 36 GB → OOMs
+        # the L4 instantly. Loading on CPU does the quantize step in 64 GB of
+        # host RAM, after which we move the now-12 GB FP8 model to GPU.
         loader_key = "load_flow_model_quintized" if self.use_fp8 else "load_flow_model"
-        logger.info(f"Loading Flux ({self.flux_model_name}, use_fp8={self.use_fp8}) via PuLID's {loader_key}...")
+        logger.info(f"Loading Flux ({self.flux_model_name}, use_fp8={self.use_fp8}) via PuLID's {loader_key} (CPU first)...")
         t0 = time.time()
         self._flux = self._pulid_modules[loader_key](
             self.flux_model_name,
-            device="cpu" if self.offload else self.device,
+            device="cpu",
         )
         _patch_flux_forward_for_controlnet(
             self._flux, self._pulid_modules["timestep_embedding"]
         )
         self._flux.eval()
         gc.collect()
-        torch.cuda.empty_cache()
-        logger.info(f"Flux DiT loaded + forward patched in {time.time() - t0:.1f}s")
+        logger.info(f"Flux loaded on CPU + forward patched in {time.time() - t0:.1f}s")
+
+        # Now move to GPU unless caller explicitly wants offload semantics.
+        if not self.offload:
+            t0 = time.time()
+            self._flux = self._flux.to(self.device)
+            logger.info(f"Flux moved to {self.device} in {time.time() - t0:.1f}s")
+            torch.cuda.empty_cache()
 
         # ---- T5 / CLIP / AE on CPU ---------------------------------------
         # On a 22 GB-usable L4, simultaneously holding Flux (~12 GB FP8) +
