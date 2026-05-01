@@ -82,6 +82,7 @@ def _import_pulid_flux():
         from flux.modules.layers import timestep_embedding  # type: ignore
         from flux.sampling import get_noise, get_schedule, prepare, unpack  # type: ignore
         from flux.util import (  # type: ignore
+            configs as flux_configs,
             load_ae,
             load_clip,
             load_flow_model,
@@ -97,6 +98,7 @@ def _import_pulid_flux():
         ) from e
     return {
         "Flux": _PuLIDFlux,
+        "configs": flux_configs,
         "timestep_embedding": timestep_embedding,
         "get_noise": get_noise,
         "get_schedule": get_schedule,
@@ -109,6 +111,57 @@ def _import_pulid_flux():
         "load_t5": load_t5,
         "PuLIDPipeline": PuLIDPipeline,
     }
+
+
+def _load_flux_quintized_low_peak(pulid_modules, name: str, device):
+    """Drop-in replacement for PuLID's `load_flow_model_quintized` that avoids
+    a 24 GB CPU peak from materializing the BF16 Flux skeleton.
+
+    PuLID's loader does:
+        model = Flux(params).to(torch.bfloat16)        # ~24 GB on CPU
+        sd    = load_sft(fp8_ckpt, device='cpu')        # +12 GB on CPU
+        requantize(model, sd, qmap, device=device)      # replaces in-place
+    Peak: ~36 GB CPU. On the g2-standard-16 driver (64 GB total, ~46 GB after
+    JVM/Spark overhead), this OOMs the kernel during the BF16 allocation.
+
+    We use accelerate's `init_empty_weights()` to construct the Flux skeleton
+    on the `meta` device (no actual memory). `requantize` then materializes
+    parameters directly on `device` while consuming `sd`, so peak is just the
+    FP8 state dict (~12 GB).
+    """
+    import json
+    import os
+    from accelerate import init_empty_weights
+    from huggingface_hub import hf_hub_download
+    from optimum.quanto import requantize
+    from safetensors.torch import load_file as load_sft
+
+    Flux = pulid_modules["Flux"]
+    configs = pulid_modules["configs"]
+
+    ckpt_path = "models/flux-dev-fp8.safetensors"
+    if not os.path.exists(ckpt_path):
+        ckpt_path = hf_hub_download(
+            "XLabs-AI/flux-dev-fp8", "flux-dev-fp8.safetensors"
+        )
+    json_path = hf_hub_download(
+        "XLabs-AI/flux-dev-fp8", "flux_dev_quantization_map.json"
+    )
+
+    logger.info("Building Flux skeleton on meta device (no memory)...")
+    with init_empty_weights():
+        model = Flux(configs[name].params)
+
+    logger.info(f"Loading FP8 checkpoint from {ckpt_path} (CPU)...")
+    sd = load_sft(ckpt_path, device="cpu")
+    with open(json_path) as f:
+        quantization_map = json.load(f)
+
+    logger.info(f"Requantizing to {device}...")
+    requantize(model, sd, quantization_map, device=device)
+    del sd
+    gc.collect()
+    return model
 
 
 # --------------------------- forward extension via monkey-patch (no subclass)
@@ -323,28 +376,41 @@ class FluxPuLIDNativeGenerator(CounterfactualGenerator):
         # already loaded; replace its forward in-place to honor ControlNet
         # residuals while preserving PuLID's pulid_ca insertions.
         # Avoids the double-instantiation that OOMs on a 24 GB L4 BF16.
-        # Load on CPU first regardless of target device. Reason: with use_fp8,
-        # PuLID's `load_flow_model_quintized` first builds a BF16 model and
-        # then quantizes in place. If we target GPU directly, peak GPU memory
-        # during quantization is ~24 GB (BF16) + ~12 GB (FP8) = 36 GB → OOMs
-        # the L4 instantly. Loading on CPU does the quantize step in 64 GB of
-        # host RAM, after which we move the now-12 GB FP8 model to GPU.
-        loader_key = "load_flow_model_quintized" if self.use_fp8 else "load_flow_model"
-        logger.info(f"Loading Flux ({self.flux_model_name}, use_fp8={self.use_fp8}) via PuLID's {loader_key} (CPU first)...")
+        # FP8 path uses our low-peak loader (~12 GB CPU peak) instead of
+        # PuLID's stock `load_flow_model_quintized` (~36 GB peak — OOMs the
+        # 64 GB driver). The low-peak path materializes weights directly on
+        # `device`, so we pass self.device.
+        # BF16 path (use_fp8=False) keeps PuLID's stock loader on CPU, then
+        # moves to GPU. BF16 is 24 GB → won't fit on a 22 GB L4 alone; only
+        # use this on a larger GPU.
         t0 = time.time()
-        self._flux = self._pulid_modules[loader_key](
-            self.flux_model_name,
-            device="cpu",
-        )
+        if self.use_fp8:
+            target_device = "cpu" if self.offload else self.device
+            logger.info(
+                f"Loading Flux ({self.flux_model_name}, use_fp8=True) via "
+                f"low-peak loader → {target_device}..."
+            )
+            self._flux = _load_flux_quintized_low_peak(
+                self._pulid_modules, self.flux_model_name, target_device
+            )
+        else:
+            logger.info(
+                f"Loading Flux ({self.flux_model_name}, use_fp8=False) "
+                f"via PuLID's load_flow_model on CPU..."
+            )
+            self._flux = self._pulid_modules["load_flow_model"](
+                self.flux_model_name,
+                device="cpu",
+            )
         _patch_flux_forward_for_controlnet(
             self._flux, self._pulid_modules["timestep_embedding"]
         )
         self._flux.eval()
         gc.collect()
-        logger.info(f"Flux loaded on CPU + forward patched in {time.time() - t0:.1f}s")
+        logger.info(f"Flux loaded + forward patched in {time.time() - t0:.1f}s")
 
-        # Now move to GPU unless caller explicitly wants offload semantics.
-        if not self.offload:
+        # BF16 path: now move to GPU (FP8 path already on target_device).
+        if not self.use_fp8 and not self.offload:
             t0 = time.time()
             self._flux = self._flux.to(self.device)
             logger.info(f"Flux moved to {self.device} in {time.time() - t0:.1f}s")
