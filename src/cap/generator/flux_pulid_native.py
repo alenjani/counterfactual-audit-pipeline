@@ -173,23 +173,29 @@ def _load_flux_quintized_low_peak(pulid_modules, name: str, device):
             _quantize_submodule(model, mod_name, m, weights=weights, activations=activations)
     logger.info("QLinear modules installed (meta).")
 
-    logger.info(f"Loading FP8 state dict from {ckpt_path} (CPU)...")
-    sd = load_sft(ckpt_path, device="cpu")
+    # Load FP8 weights DIRECTLY to the target device. safetensors can mmap-
+    # load each tensor straight to CUDA, so the 12 GB state dict never lands
+    # in host RAM. Critical because:
+    #   - The g2-standard-16 driver has ~22 GB of usable Python heap after
+    #     JVM/Spark overhead. Holding 12 GB sd on CPU + transient 12 GB GPU
+    #     copy during .to(device) peaks at ~24 GB on the driver → kernel hang
+    #     ("DRIVER_NOT_RESPONDING" with no Python traceback).
+    # Loading straight to GPU pins peak host usage at ~0 GB (transient per-
+    # tensor read buffers only) and peak GPU at 12 GB final.
+    target_device = str(device) if not isinstance(device, str) else device
+    logger.info(f"Loading FP8 state dict from {ckpt_path} directly to {target_device}...")
+    sd = load_sft(ckpt_path, device=target_device)
 
-    # assign=True replaces meta params with the FP8 tensors directly. This is
-    # the critical step: stock requantize does this AFTER moving the (still
-    # BF16) model to GPU, which OOMs. We do it BEFORE the move.
-    logger.info("Assigning FP8 weights to meta params (no BF16 intermediate)...")
+    # assign=True replaces meta params with the FP8 tensors. After this,
+    # model's params live on `device` — no separate .to(device) needed.
+    logger.info("Assigning FP8 weights to meta params (no BF16, no CPU intermediate)...")
     missing, unexpected = model.load_state_dict(sd, strict=False, assign=True)
     if missing:
-        logger.warning(f"  load_state_dict missing keys: {len(missing)} (first 3: {missing[:3]})")
+        logger.warning(f"  missing keys: {len(missing)} (first 3: {missing[:3]})")
     if unexpected:
-        logger.warning(f"  load_state_dict unexpected keys: {len(unexpected)} (first 3: {unexpected[:3]})")
+        logger.warning(f"  unexpected keys: {len(unexpected)} (first 3: {unexpected[:3]})")
     del sd
     gc.collect()
-
-    logger.info(f"Moving FP8 Flux to {device}...")
-    model.to(device)
     return model
 
 
