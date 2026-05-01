@@ -431,17 +431,31 @@ class FluxPuLIDNativeGenerator(CounterfactualGenerator):
         )
         logger.info(f"T5/CLIP/AE loaded on CPU in {time.time() - t0:.1f}s")
 
-        # ---- ControlNet (diffusers, just for the model & forward) --------
+        # ---- ControlNet (diffusers, FP8-quantized to fit on L4) ----------
+        # Layout when use_fp8=True on a 22 GB-usable L4:
+        #   Flux FP8 (12 GB) + ControlNet BF16 (6 GB) + PuLID adapter (3 GB)
+        #   = 21 GB resident, leaves <1 GB for activations → OOM.
+        # FP8-quantizing ControlNet drops it to ~3 GB and gives ~4 GB for
+        # activations. Quantize on CPU first (BF16+FP8 peak in host RAM, not
+        # GPU), then move FP8 to GPU.
         t0 = time.time()
         from diffusers import FluxControlNetModel
 
-        self._controlnet = FluxControlNetModel.from_pretrained(
+        cn = FluxControlNetModel.from_pretrained(
             self.controlnet_model_id,
             torch_dtype=self.weight_dtype,
             cache_dir=self.cache_dir,
-        ).to(self.device)
-        self._controlnet.eval()
-        logger.info(f"ControlNet loaded in {time.time() - t0:.1f}s")
+        )
+        cn.eval()
+        if self.use_fp8:
+            from optimum.quanto import freeze, qfloat8, quantize as quanto_quantize
+
+            logger.info("Quantizing ControlNet to FP8 on CPU...")
+            quanto_quantize(cn, weights=qfloat8)
+            freeze(cn)
+            gc.collect()
+        self._controlnet = cn.to(self.device)
+        logger.info(f"ControlNet loaded ({'FP8' if self.use_fp8 else 'BF16'}) in {time.time() - t0:.1f}s")
 
         # ---- PuLID identity pipeline (attaches pulid_ca to our flux) -----
         t0 = time.time()
