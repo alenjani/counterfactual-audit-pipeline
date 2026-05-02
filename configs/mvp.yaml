@@ -38,8 +38,16 @@ generator:
                                      # demographic-correlated edges.
   face_model_name: antelopev2        # ArcFace r100 + WebFace42M; required for
                                      # tight identity-preservation measurement.
-  num_inference_steps: 28
+  num_inference_steps: 40            # 28→40 to lift identity preservation:
+                                     # MVP-6 mean cosine 0.578 (preserved 80%);
+                                     # paper-grade target ≥ 0.65 / ≥ 90% needs
+                                     # more denoising steps.
   guidance_scale: 3.5
+  id_weight: 1.5                     # PuLID identity strength. Default 1.0
+                                     # gave 80% preserved; 1.5 trades ~5%
+                                     # ControlNet adherence for ~10% identity
+                                     # preservation (community-validated).
+  controlnet_conditioning_scale: 0.6 # Pose ControlNet strength (unchanged).
   width: 768                         # CLAUDE.md item 4 floor. Validated at 768
                                      # in diag run 13296386370223. 1024² with
                                      # FP8 + FP8 CN + PuLID is ~22.5 GB → OOM.

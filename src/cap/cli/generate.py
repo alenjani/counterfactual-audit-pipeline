@@ -114,6 +114,8 @@ def main(
             "hf_token": hf_token or os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN"),
             "face_model_name": gen_cfg.get("face_model_name", "antelopev2"),
             "pulid_src": pulid_src,
+            "id_weight": float(gen_cfg.get("id_weight", 1.0)),
+            "controlnet_conditioning_scale": float(gen_cfg.get("controlnet_conditioning_scale", 0.6)),
         }
 
         if not ray.is_initialized():

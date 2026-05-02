@@ -49,6 +49,8 @@ class FluxActor:
         hf_token: str | None = None,
         face_model_name: str = "antelopev2",
         pulid_src: str | None = None,
+        id_weight: float = 1.0,
+        controlnet_conditioning_scale: float = 0.6,
     ):
         import os
         import sys
@@ -107,6 +109,8 @@ class FluxActor:
             cache_dir=local_hf_home,
             face_model_name=face_model_name,
             use_fp8=True,
+            id_weight=id_weight,
+            controlnet_conditioning_scale=controlnet_conditioning_scale,
         )
 
     def warm(self) -> dict[str, Any]:
