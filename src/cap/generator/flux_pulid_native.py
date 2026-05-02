@@ -530,6 +530,35 @@ class FluxPuLIDNativeGenerator(CounterfactualGenerator):
         logger.info(f"ControlNet loaded ({'FP8' if self.use_fp8 else 'BF16'}) in {time.time() - t0:.1f}s")
 
         # ---- PuLID identity pipeline (attaches pulid_ca to our flux) -----
+        # Before instantiating, redirect facexlib's model downloads off the
+        # package dir (read-only on Databricks Ray workers' ephemeral_nfs).
+        # FaceRestoreHelper and PuLID's bare init_parsing_model() call both
+        # default to a path under <facexlib-pkg>/weights/, which fails with
+        # "Read-only file system" on workers (works on the driver — that's
+        # why the diagnostic missed this).
+        _facexlib_root = Path("/local_disk0/facexlib_weights")
+        _facexlib_root.mkdir(parents=True, exist_ok=True)
+        import facexlib.utils.face_restoration_helper as _frh_mod
+        if not getattr(_frh_mod.FaceRestoreHelper.__init__, "_cap_patched", False):
+            _orig_frh = _frh_mod.FaceRestoreHelper.__init__
+            def _frh_init(self, *args, **kwargs):
+                if kwargs.get("model_rootpath") is None:
+                    kwargs["model_rootpath"] = str(_facexlib_root)
+                return _orig_frh(self, *args, **kwargs)
+            _frh_init._cap_patched = True  # type: ignore[attr-defined]
+            _frh_mod.FaceRestoreHelper.__init__ = _frh_init
+        # Also patch the bare init_parsing_model PuLID calls *outside* of
+        # FaceRestoreHelper (overrides face_helper.face_parse a few lines later).
+        import pulid.pipeline_flux as _ppf
+        if not getattr(_ppf.init_parsing_model, "_cap_patched", False):
+            _orig_ipm = _ppf.init_parsing_model
+            def _ipm(*args, **kwargs):
+                if kwargs.get("model_rootpath") is None:
+                    kwargs["model_rootpath"] = str(_facexlib_root)
+                return _orig_ipm(*args, **kwargs)
+            _ipm._cap_patched = True  # type: ignore[attr-defined]
+            _ppf.init_parsing_model = _ipm
+
         t0 = time.time()
         PuLIDPipeline = self._pulid_modules["PuLIDPipeline"]
         self._pulid = PuLIDPipeline(
