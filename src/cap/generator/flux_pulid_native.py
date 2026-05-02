@@ -173,16 +173,30 @@ def _load_flux_quintized_low_peak(pulid_modules, name: str, device):
             _quantize_submodule(model, mod_name, m, weights=weights, activations=activations)
     logger.info("QLinear modules installed (meta).")
 
-    # Disable quanto's Marlin-FP8 optimization. Marlin is a faster FP8 matmul
-    # kernel, but its packing step (per-layer) requires holding the original
-    # FP8 weight + a same-size int32 packed buffer + a transient int32 cast,
-    # peaking at ~3× weight size per layer on GPU. Cumulatively across 19+38
-    # Flux blocks, this exceeds the L4's 22 GB ceiling and OOMs at ~21.5 GB.
-    # Plain WeightQBytesTensor uses ~25-30% slower matmul but has flat memory.
-    # For our hardware it's the right trade.
+    # Disable quanto's Marlin-FP8 path entirely. Two reasons:
+    # 1. Memory: Marlin's per-layer packing peaks ~3× weight on GPU →
+    #    cumulative load OOMs the L4.
+    # 2. JIT-compile: Marlin needs a CUDA extension that quanto JIT-builds
+    #    inside its package dir (`<site-packages>/optimum/quanto/library/
+    #    extensions/cuda/build/`). On Databricks Ray workers that path is on
+    #    a read-only ephemeral_nfs filesystem → JIT lock acquire fails.
+    # Patch `.optimize` (used during load_state_dict) AND `.create` (used
+    # during `.to(device)` dispatch) to skip the Marlin branch and return
+    # plain WeightQBytesTensor instances. ~25-30% slower matmul, no JIT,
+    # no extra GPU pressure.
     from optimum.quanto.tensor.weights.qbytes import WeightQBytesTensor as _WQB
     _WQB.optimize = lambda self: self  # type: ignore[method-assign]
-    logger.info("Marlin-FP8 optimization disabled (memory-friendly mode).")
+    _orig_create = _WQB.create
+
+    def _create_no_marlin(qtype, axis, size, stride, data, scale,
+                          activation_qtype=None, requires_grad=False):
+        # Plain WeightQBytesTensor — skip the in_features/out_features check
+        # that would route to MarlinF8QBytesTensor on sm_89+ GPUs.
+        return _WQB(qtype, axis, size, stride, data, scale,
+                    activation_qtype, requires_grad)
+
+    _WQB.create = staticmethod(_create_no_marlin)  # type: ignore[method-assign]
+    logger.info("Marlin-FP8 path disabled (memory + read-only-fs friendly).")
 
     # Load FP8 weights DIRECTLY to the target device. safetensors can mmap-
     # load each tensor straight to CUDA, so the 12 GB state dict never lands
