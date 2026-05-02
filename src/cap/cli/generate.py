@@ -57,6 +57,17 @@ logger = get_logger()
     default=None,
     help="HF model cache dir. Override the per-actor default for Volume-backed cache.",
 )
+@click.option(
+    "--priority-mode",
+    type=click.Choice(["none", "paper1_first"]),
+    default="none",
+    help=(
+        "Order of generated cells. 'none' = legacy (one request per identity, "
+        "all axes generated together, single seed). 'paper1_first' = expand to "
+        "per-cell requests across all generation_seeds, sorted so Paper 1 cells "
+        "(seed=42, anchor age) come first; required for staged full-instrument runs."
+    ),
+)
 def main(
     config_path: str,
     limit: int | None,
@@ -65,6 +76,7 @@ def main(
     hf_token: str | None,
     pulid_src: str | None,
     cache_dir: str | None,
+    priority_mode: str,
 ) -> None:
     cfg = load_config(config_path)
     set_global_seed(cfg.get("seed", 42))
@@ -85,7 +97,14 @@ def main(
     logger.info(f"Generating counterfactuals for {len(seeds)} seed identities (backend={backend})")
 
     # Build the request list once — both backends consume the same shape.
-    requests = [_seed_to_request(s, cfg, gen_cfg) for s in seeds]
+    if priority_mode == "paper1_first":
+        requests = _build_priority_requests(seeds, cfg, gen_cfg)
+        logger.info(
+            f"Priority mode 'paper1_first' → {len(requests)} per-cell requests "
+            f"(was {len(seeds)} per-identity requests in legacy mode)"
+        )
+    else:
+        requests = [_seed_to_request(s, cfg, gen_cfg) for s in seeds]
 
     if backend == "local":
         generator = FluxPuLIDControlNetGenerator(
@@ -176,6 +195,69 @@ def _seed_to_request(seed: dict, cfg, gen_cfg) -> GenerationRequest:
         width=gen_cfg.get("width", 1024),
         height=gen_cfg.get("height", 1024),
     )
+
+
+def _build_priority_requests(seeds: list[dict], cfg, gen_cfg) -> list[GenerationRequest]:
+    """Per-cell requests sorted so Paper 1 (Stage A) cells come first.
+
+    Stage A = (seed=42, age=anchor) — fully sufficient for Paper 1 ISR.
+    Stage B = (seed=42, age!=anchor) — adds the age axis.
+    Stage C = (seed!=42) — adds the noise-robustness check across all cells.
+
+    Within each stage, cells are ordered by (identity, skin, gender, age) so
+    skip-if-exists resume picks up at a deterministic point. See
+    plans/003-full-instrument-plan.md for the cumulative staging rationale.
+    """
+    import itertools
+
+    axes = cfg["counterfactual_axes"]
+    skin_vals = axes.get("skin_tone") or [None]
+    gender_vals = axes.get("gender") or [None]
+    age_vals = axes.get("age") or [None]
+    gen_seeds = cfg.get("generation_seeds", [cfg.get("seed", 42)])
+    if not gen_seeds:
+        gen_seeds = [42]
+    anchor_age = cfg.get("priority_age_anchor", 40)
+
+    items: list[tuple[tuple, GenerationRequest]] = []
+    for s in seeds:
+        for skin, gender, age, gen_seed in itertools.product(
+            skin_vals, gender_vals, age_vals, gen_seeds
+        ):
+            single_axes: dict[str, list] = {}
+            if skin is not None:
+                single_axes["skin_tone"] = [skin]
+            if gender is not None:
+                single_axes["gender"] = [gender]
+            if age is not None:
+                single_axes["age"] = [age]
+
+            # Stage tier (lower = earlier):
+            #   tier 0 = seed=42 + age=anchor (Stage A: Paper 1)
+            #   tier 1 = seed=42 + age!=anchor (Stage B)
+            #   tier 2 = seed!=42 (Stage C)
+            if gen_seed == gen_seeds[0]:
+                tier = 0 if (age is None or age == anchor_age) else 1
+            else:
+                tier = 2 + gen_seeds.index(gen_seed) - 1
+            priority = (tier, s["id"], skin, gender, age, gen_seed)
+
+            req = GenerationRequest(
+                seed_identity_id=s["id"],
+                seed_image_path=s["image_path"],
+                seed_prompt=None,
+                counterfactual_axes=single_axes,
+                fixed_attributes=cfg.get("fixed_attributes", {}),
+                seed=int(gen_seed),
+                num_inference_steps=gen_cfg.get("num_inference_steps", 28),
+                guidance_scale=gen_cfg.get("guidance_scale", 3.5),
+                width=gen_cfg.get("width", 1024),
+                height=gen_cfg.get("height", 1024),
+            )
+            items.append((priority, req))
+
+    items.sort(key=lambda x: tuple(str(v) if v is not None else "" for v in x[0]))
+    return [r for _, r in items]
 
 
 def _load_seed_identities(cfg) -> list[dict]:

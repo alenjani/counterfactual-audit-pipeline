@@ -1,40 +1,59 @@
 # Full run — reusable scientific instrument across all four planned papers.
-# 200 seed identities × 60 counterfactual variations (6 skin × 2 gender × 5 age) × 3 seeds ≈ 18K images.
-# 7 auditors × 7 tasks ≈ 880K audit data points.
-# Paper 1 uses ~5–10% of this; rest is runway for Papers 2–4.
-# Expected runtime on L4: ~150–300 GPU hours, split across multiple sessions.
+# 200 seed identities × 60 axis combinations (6 skin × 2 gender × 5 age) × 3 generation seeds = 36,000 images.
+# 7 auditors × 7 tasks ≈ 1.76M audit data points (some auditor/task pairs not applicable; effective slightly lower).
+#
+# v2 (2026-05-02): revised after Review 001 §4 architectural fix. See plans/002 + plans/DEVIATIONS.md.
+# v1 archived at configs/archive/full_v1_2026-04-archived.yaml.
+#
+# Hardware target: same 4×L4 cluster as MVP (cluster 6106-192556-lj0uddmy, g2-standard-32 driver).
+# Wall time: ~525 GPU-hours = ~21 days continuous (Stage A 1.5d → Stage B 7d → Stage C 21d cumulative).
+# See plans/003-full-instrument-plan.md for the 3-stage cumulative execution plan + HF backups.
 
 run_id: full_${env:USER}_${date:%Y%m%d}
-seed: 42
+seed: 42                                 # Default / fallback. Real iteration uses generation_seeds below.
 
 paths:
-  seed_dataset: data/fairface
-  output_dir: outputs/full
-  generated_dir: outputs/full/generated
-  audit_dir: outputs/full/audit
-  analysis_dir: outputs/full/analysis
-  viz_dir: outputs/full/viz
+  # Volume-backed paths so all 4 Ray actors (across worker nodes) can read/write.
+  seed_dataset: /Volumes/ds_work/alenj00/cap_cache/seeds/fairface
+  output_dir: /Volumes/ds_work/alenj00/cap_cache/runs/full
+  generated_dir: /Volumes/ds_work/alenj00/cap_cache/runs/full/generated
+  validation_dir: /Volumes/ds_work/alenj00/cap_cache/runs/full/validation
+  audit_dir: /Volumes/ds_work/alenj00/cap_cache/runs/full/audit
+  analysis_dir: /Volumes/ds_work/alenj00/cap_cache/runs/full/analysis
+  viz_dir: /Volumes/ds_work/alenj00/cap_cache/runs/full/viz
 
 generator:
-  backend: flux_pulid_controlnet
+  # FluxPuLIDNativeGenerator (validated 2026-05-01 / 2026-05-02). Replaces the
+  # broken flux_pulid_controlnet path. See plans/002 for the architectural fix.
+  backend: flux_pulid_native
   device: cuda
-  dtype: fp8
-  num_inference_steps: 28
+  dtype: fp8                             # FP8 via optimum-quanto + custom low-peak loader.
+                                         # Marlin disabled in code (memory + read-only-fs friendly).
+  num_inference_steps: 40                # 40 steps validated paper-grade (mean cosine 0.66 / preserved 100%
+                                         # at >=0.5 in smoke n=36; see plans/002).
   guidance_scale: 3.5
-  width: 1024
-  height: 1024
+  id_weight: 1.5                         # PuLID identity-injection strength. Default 1.0 gave 80% preserved;
+                                         # 1.5 lifts to ~100% at 0.5 / ~78% at 0.6.
+  controlnet_conditioning_scale: 0.6     # Pose ControlNet strength.
+  face_model_name: antelopev2            # ArcFace r100 + WebFace42M; required by PuLID + identity validator.
+  width: 768                             # 1024² won't fit on L4 with FP8 Flux + FP8 CN + PuLID. CLAUDE.md item 4 floor.
+  height: 768
 
 seed_identities:
   source: fairface
-  count: 200
-  stratify_by: [race, gender, age]
+  count: 200                             # 4× MVP scale. Sufficient power for skin × gender ANOVA per Paper 1.
+  stratify_by: [race, gender, age]       # Balanced input pool.
 
 counterfactual_axes:
-  skin_tone: [1, 2, 3, 4, 5, 6]
+  skin_tone: [1, 2, 3, 4, 5, 6]          # Fitzpatrick I-VI
   gender: [male, female]
-  age: [20, 30, 40, 50, 60]
+  age: [20, 30, 40, 50, 60]              # Adult range, 10-year buckets.
 
-generation_seeds: [42, 137, 2718]    # 3 seeds per counterfactual for robustness
+# Multi-seed iteration for noise-robustness check. cli/generate.py with
+# --priority-mode paper1_first orders cells so Paper-1-relevant ones come first
+# (i.e., Stage A subset: age=anchor + seed=42 first).
+generation_seeds: [42, 137, 2718]
+priority_age_anchor: 40                  # Used by --priority-mode to pick the Stage A age value.
 
 fixed_attributes:
   pose: frontal
@@ -44,14 +63,15 @@ fixed_attributes:
 validators:
   identity:
     enabled: true
-    threshold: 0.5
+    threshold: 0.5                       # ArcFace cosine; CAP-default "preserved" cutoff.
   fid:
     enabled: true
-    reference_set: data/fairface/reference_distribution
+    reference_set: /Volumes/ds_work/alenj00/cap_cache/seeds/fairface_reference_distribution
   attributes:
     enabled: true
 
 auditors:
+  # Cloud auditors (paid APIs; need credentials in cap-secrets scope).
   - name: aws_rekognition
     kwargs:
       region_name: us-east-1
@@ -63,9 +83,10 @@ auditors:
     kwargs: {}
   - name: face_plus_plus
     kwargs: {}
+  # Local auditors (no API credentials required).
   - name: deepface
     kwargs:
-      detector_backend: retinaface
+      detector_backend: retinaface       # TF backend forced to CPU + Keras 2 in deepface_local.py.
   - name: insightface
     kwargs:
       model_name: buffalo_l

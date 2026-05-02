@@ -696,7 +696,7 @@ class FluxPuLIDNativeGenerator(CounterfactualGenerator):
         missing: list[tuple] = []
         for combo in all_combos:
             axis_values = dict(zip(keys, combo))
-            counterfactual_id = self._make_id(request.seed_identity_id, axis_values)
+            counterfactual_id = self._make_id(request.seed_identity_id, axis_values, request.seed)
             image_path = output_dir / f"{counterfactual_id}.png"
             if image_path.exists():
                 existing_results.append(
@@ -744,7 +744,7 @@ class FluxPuLIDNativeGenerator(CounterfactualGenerator):
                 base_attributes=request.fixed_attributes,
                 demographic_attributes=axis_values,
             )
-            counterfactual_id = self._make_id(request.seed_identity_id, axis_values)
+            counterfactual_id = self._make_id(request.seed_identity_id, axis_values, request.seed)
             image_path = output_dir / f"{counterfactual_id}.png"
 
             t0 = time.time()
@@ -784,11 +784,22 @@ class FluxPuLIDNativeGenerator(CounterfactualGenerator):
         return results
 
     @staticmethod
-    def _make_id(seed_id: str, axis_values: dict[str, Any]) -> str:
+    def _make_id(seed_id: str, axis_values: dict[str, Any], gen_seed: int | None = None) -> str:
+        """Build the PNG filename stem.
+
+        For multi-seed runs (full instrument), `gen_seed` differentiates
+        otherwise-identical (id, axes) cells generated with different noise
+        inits. For backward compat (gen_seed=42 was the implicit default in
+        the original MVP), seed=42 produces no suffix so MVP-era PNG names
+        remain stable.
+        """
         parts = [seed_id]
         for k in sorted(axis_values.keys()):
             parts.append(f"{k}{axis_values[k]}")
-        return "_".join(str(p) for p in parts)
+        out = "_".join(str(p) for p in parts)
+        if gen_seed is not None and gen_seed != 42:
+            out += f"_seed{gen_seed}"
+        return out
 
     def model_versions(self) -> dict[str, str]:
         return {
