@@ -42,7 +42,12 @@ results/mvp_demo/                        ← First MVP outputs (April 2026, brok
 | 7. **MVP at paper-grade settings (current)** | 🔄 RUNNING | (in progress) | analysis verdict + decide if quality is locked |
 | 8. `configs/full.yaml` revision | ⏳ pending phase 7 | — | author once paper-grade settings confirmed at MVP scale |
 | 9. Cloud auditor API credentials | ⏳ user action | — | AWS, Azure, Google, Face++ keys → `cap-secrets` |
-| 10. Full instrument generation | ⏳ pending phases 7-9 | — | ~22 days continuous, multi-batch on cluster |
+| 10A. Full gen — Stage A (200 IDs × 12 axes × seed 42 = 2,400) | ⏳ pending 7-9 | — | ~1.5 days |
+| 10A-bk. HF backup → `cap-counterfactuals-stage-a` | ⏳ | — | ~5 min |
+| 10B. Full gen — Stage B (+9,600 with age axis × seed 42 = 12,000 cumulative) | ⏳ | — | +5.5 days |
+| 10B-bk. HF backup → `cap-counterfactuals-stage-b` | ⏳ | — | ~25 min |
+| 10C. Full gen — Stage C (+24,000 with seeds 137 + 2718 = 36,000 cumulative) | ⏳ | — | +14 days |
+| 10C-bk. HF backup → `cap-counterfactuals-stage-c` | ⏳ | — | ~75 min |
 | 11. Full audit (7 auditors × 36K images) | ⏳ | — | ~24 hr (bottlenecked by Google Vision rate limit) |
 | 12. Full analysis | ⏳ | — | <1 hr |
 | 13. ISR paper drafting (Sept 7 deadline) | ⏳ | — | uses `paper_1_isr` slice |

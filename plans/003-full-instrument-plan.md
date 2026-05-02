@@ -36,12 +36,36 @@
 
 ### Wall time
 
-- Generation: 36,000 images × 3.5 min/image / 4 actors = ~525 GPU-hours = **~22 days continuous**
+- Generation: 36,000 images × 3.5 min/image / 4 actors = ~525 GPU-hours = **~22 days continuous compute**
 - Audit (cloud): bottlenecked by Google Vision rate limit, ~24 hr total
 - Audit (local): parallelizable on cluster, ~8-10 hr
 - Analyze + viz: <1 hr
 
 **Critical path: generation ≈ 22 days. Everything else is small in comparison.**
+
+### Three-stage cumulative generation (locked 2026-05-02)
+
+The 36K is built incrementally — never re-doing prior work — so an interruption at any point leaves a usable dataset:
+
+| stage | new cells | new images | cumulative images | wall (delta) | cumulative wall | papers usable if interrupted here |
+|---|---|---|---|---|---|---|
+| **A** | 200 IDs × 12 (skin × gender) × seed 42 | 2,400 | 2,400 | ~1.5 d | 1.5 d | Paper 1 ISR (single-seed) |
+| **B** | 200 IDs × 48 (= 60 - 12) NEW axes × seed 42 | 9,600 | 12,000 | ~5.5 d | 7 d | Papers 2 + 3 + Paper 1 with age axis (single-seed) |
+| **C** | All 12,000 cells × seeds 137, 2718 | 24,000 | 36,000 | ~14 d | 21 d | All 4 papers, 3-seed robustness |
+
+Paper 1 (ISR) only needs Stage A (single seed) to ship; reviewer-defensible robustness comes after Stage C.
+
+### HF Datasets backup checkpoints
+
+After each stage completes, push a **versioned snapshot** to HuggingFace Datasets (private). This is off-cluster backup against Volume corruption / accidental deletion (the latter happened to MVP-6 artifacts; cause unexplained).
+
+| after stage | HF dataset push | content | est. push time |
+|---|---|---|---|
+| A | `alenjani/cap-counterfactuals-stage-a` (private) | 2,400 PNGs + manifests | ~5 min |
+| B | `alenjani/cap-counterfactuals-stage-b` (private) | 12,000 PNGs + manifests + analysis-so-far | ~25 min |
+| C | `alenjani/cap-counterfactuals-stage-c` (private) | 36,000 PNGs + full audit + analysis + viz | ~75 min |
+
+Each stage's dataset is a separate HF repo — snapshots are immutable, so you can always roll back to a prior stage's data exactly. The final Zenodo DOI (at first paper submission) gets minted from `stage-c`.
 
 ### Calendar
 
