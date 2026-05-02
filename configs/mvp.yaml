@@ -25,18 +25,25 @@ paths:
   viz_dir: /Volumes/ds_work/alenj00/cap_cache/runs/mvp/viz
 
 generator:
-  backend: flux_pulid_controlnet
+  backend: flux_pulid_native         # FluxPuLIDNativeGenerator (architectural
+                                     # fix validated 2026-05-01). Replaces the
+                                     # broken FluxPuLIDControlNetGenerator that
+                                     # silently fell back to text-only Flux.
   device: cuda
-  dtype: nf4                         # NF4 fits the full pipeline on a 24 GB L4.
-                                     # FP8 OOMs at 1024². Per CLAUDE.md item 4.
+  dtype: fp8                         # FluxPuLIDNativeGenerator uses optimum-quanto
+                                     # FP8 with a custom low-peak loader + Marlin
+                                     # disabled to fit on the 22 GB L4. NF4 only
+                                     # if FP8 stops fitting (CLAUDE.md item 3).
   controlnet_mode: pose              # required; canny/depth would confound
                                      # demographic-correlated edges.
   face_model_name: antelopev2        # ArcFace r100 + WebFace42M; required for
                                      # tight identity-preservation measurement.
   num_inference_steps: 28
   guidance_scale: 3.5
-  width: 1024
-  height: 1024
+  width: 768                         # CLAUDE.md item 4 floor. Validated at 768
+                                     # in diag run 13296386370223. 1024² with
+                                     # FP8 + FP8 CN + PuLID is ~22.5 GB → OOM.
+  height: 768
 
 seed_identities:
   source: fairface

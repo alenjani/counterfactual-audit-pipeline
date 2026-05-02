@@ -53,6 +53,43 @@ def main(config_path: str) -> None:
     predictions = pd.read_parquet(audit_dir / "predictions.parquet")
     logger.info(f"Loaded {len(predictions)} audit predictions; columns={list(predictions.columns)}")
 
+    # ---- Label normalization (per Review 001 §4 follow-up) -------------------
+    # Auditors return service-native labels (DeepFace: "Man"/"Woman", AWS
+    # Rekognition: "Male"/"Female", Azure: "male"/"female", Face++: "M"/"F",
+    # Google Vision: "Likely"/"Possibly"/"Unlikely" with gender, ...). Without
+    # normalization, a string compare to axis_gender ("male"/"female") marks
+    # every prediction as wrong → ANOVA has zero variance → empty H1/H3.
+    # Normalize predictions in-place to the canonical {male, female} alphabet
+    # used by axis_gender. Unknown values are left as-is (will still register
+    # as errors but at least correctly rather than systemically).
+    _GENDER_ALIASES = {
+        # DeepFace
+        "man": "male", "woman": "female",
+        # AWS Rekognition
+        "male": "male", "female": "female",
+        # Face++
+        "m": "male", "f": "female",
+        # Misc
+        "boy": "male", "girl": "female",
+    }
+    if "task" in predictions.columns and "prediction" in predictions.columns:
+        gender_mask = predictions["task"] == "gender"
+        n_to_norm = int(gender_mask.sum())
+        if n_to_norm > 0:
+            normalized = (
+                predictions.loc[gender_mask, "prediction"]
+                .astype(str)
+                .str.strip()
+                .str.lower()
+                .map(lambda v: _GENDER_ALIASES.get(v, v))
+            )
+            predictions.loc[gender_mask, "prediction"] = normalized
+            uniq = sorted(predictions.loc[gender_mask, "prediction"].dropna().unique().tolist())
+            logger.info(
+                f"Normalized {n_to_norm} gender-task predictions; "
+                f"resulting alphabet: {uniq}"
+            )
+
     has_skin_tone = "axis_skin_tone" in predictions.columns
     has_gender = "axis_gender" in predictions.columns
     if not (has_skin_tone and has_gender):
