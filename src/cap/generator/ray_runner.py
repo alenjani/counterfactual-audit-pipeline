@@ -54,9 +54,18 @@ class FluxActor:
         import sys
         from pathlib import Path
 
-        os.environ["HF_HOME"] = cache_dir
-        os.environ["HUGGINGFACE_HUB_CACHE"] = cache_dir
-        os.environ["TRANSFORMERS_CACHE"] = cache_dir
+        # HF_HOME MUST be on a non-FUSE filesystem. HF Hub writes downloads to
+        # `<HF_HOME>/.../<hash>.incomplete` then renames to the final path.
+        # GCS-FUSE-backed Volumes silently drop the rename (the .incomplete
+        # file vanishes mid-rename → FileNotFoundError on copy fallback).
+        # /local_disk0 is per-worker local SSD — fast, writable, non-FUSE.
+        # The cache_dir argument is honored separately for diffusers'
+        # from_pretrained calls where it's safe to pass.
+        local_hf_home = "/local_disk0/hf_cache"
+        Path(local_hf_home).mkdir(parents=True, exist_ok=True)
+        os.environ["HF_HOME"] = local_hf_home
+        os.environ["HUGGINGFACE_HUB_CACHE"] = local_hf_home
+        os.environ["TRANSFORMERS_CACHE"] = local_hf_home
         # HF Hub's xet downloader fails on GCS-FUSE Volumes ("File too large,
         # os error 27"). Force plain HTTP download until xet supports FUSE.
         os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
@@ -70,6 +79,9 @@ class FluxActor:
         Path("/dev/shm/tmp").mkdir(parents=True, exist_ok=True)
         # Reduce CUDA fragmentation on the L4.
         os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+        # `cache_dir` is intentionally NOT used as HF_HOME — it goes to
+        # diffusers' from_pretrained calls where Volume paths can work
+        # because we set HF_HUB_DISABLE_XET=1.
         if hf_token:
             os.environ["HF_TOKEN"] = hf_token
             os.environ["HUGGING_FACE_HUB_TOKEN"] = hf_token
@@ -87,7 +99,12 @@ class FluxActor:
         self.generator = FluxPuLIDNativeGenerator(
             flux_model_name="flux-dev",
             controlnet_mode=controlnet_mode,
-            cache_dir=cache_dir,
+            # Use local SSD for the HF cache too — diffusers' from_pretrained
+            # has the same .incomplete-rename issue on GCS-FUSE Volumes that
+            # caused the original MVP host to OOM. Each worker is a separate
+            # node with its own /local_disk0, so cross-worker re-download is
+            # unavoidable but cheap (~5 min/12 GB with HF_HUB_ENABLE_HF_TRANSFER).
+            cache_dir=local_hf_home,
             face_model_name=face_model_name,
             use_fp8=True,
         )
