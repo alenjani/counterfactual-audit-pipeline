@@ -56,6 +56,9 @@ dependencies = [
     "insightface>=0.7",  # ArcFace identity validation
     "onnxruntime-gpu>=1.18",  # InsightFace backend
     "deepface>=0.0.93",
+    "tf-keras>=2.16",  # Keras 2 backend for DeepFace (Keras 3 is incompatible:
+                      # raw TF ops on KerasTensors throw "cannot use as input
+                      # to TF function"). Activated via TF_USE_LEGACY_KERAS=1.
     "facexlib>=0.3",  # face restoration / parsing utilities
 
     # Statistics

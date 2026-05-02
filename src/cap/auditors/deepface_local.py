@@ -11,18 +11,25 @@ logger = get_logger()
 
 
 def _force_tf_cpu() -> None:
-    """Pin TensorFlow to CPU for DeepFace.
+    """Pin TensorFlow to CPU and Keras 2 for DeepFace.
 
-    On Databricks GPU clusters the L4's CUDA context is held by PyTorch
-    (cap.generator side). When DeepFace's TF backend tries to allocate a
-    TF graph on the same GPU device, every batch-norm op fails with
-    `Graph execution error: ... FusedBatchNormV3` (TF + PyTorch sharing
-    a CUDA context don't mix at the graph executor level). Audit time is
-    a small fraction of total wall, so CPU is fine.
+    Two issues to handle:
+    1. GPU contention: PyTorch holds the L4 CUDA context; TF + PyTorch
+       sharing a context fails at the graph executor (`FusedBatchNormV3`).
+       Force TF to CPU.
+    2. Keras 3 incompatibility: DeepFace's models use raw TF ops on
+       KerasTensors, which Keras 3 (default in TF 2.16+) forbids with
+       "A KerasTensor cannot be used as input to a TensorFlow function".
+       TF_USE_LEGACY_KERAS=1 routes TF to Keras 2 (legacy), which DeepFace
+       supports. Requires the tf-keras package; we try and tolerate.
+
+    Both env vars must be set BEFORE the first TF import. We also call
+    set_visible_devices as a defensive belt-and-suspenders.
     """
-    # Set BEFORE TF imports if possible; works as a hint even after.
-    os.environ.setdefault("CUDA_VISIBLE_DEVICES", "-1")
-    os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+    # Force CPU (idempotent — overwrite even if already set).
+    os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+    os.environ["TF_USE_LEGACY_KERAS"] = "1"
+    os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
     try:
         import tensorflow as tf
         tf.config.set_visible_devices([], "GPU")
