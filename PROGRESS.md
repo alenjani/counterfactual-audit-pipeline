@@ -40,6 +40,9 @@ results/mvp_demo/                        ← First MVP outputs (April 2026, brok
 | 5. MVP-6 (n=600, paper-grade fix) | ✅ done | 2026-05-02 | — |
 | 6. Smoke validation of analysis pipeline (n=36) | ✅ done | 2026-05-02 | — |
 | 7. **MVP at paper-grade settings (current)** | 🔄 RUNNING | (in progress) | analysis verdict + decide if quality is locked |
+| 7a. Profile per-image actor overhead (find what eats 30-60s) | ⏳ | — | timing instrumentation on FluxActor.generate(); 0-20% speedup if culprit found |
+| 7b. T5/CLIP prompt-embedding cache | ⏳ | — | lru_cache on prompt → embeddings; ~3-5% speedup |
+| 7c. Decide A100 swap or stay on L4 | ⏳ | — | re-estimate full-run wall after 7a/7b; A100 if > 4 wk projected |
 | 8. `configs/full.yaml` revision | ⏳ pending phase 7 | — | author once paper-grade settings confirmed at MVP scale |
 | 9. Cloud auditor API credentials | ⏳ user action | — | AWS, Azure, Google, Face++ keys → `cap-secrets` |
 | 10A. Full gen — Stage A (200 IDs × 12 axes × seed 42 = 2,400) | ⏳ pending 7-9 | — | ~1.5 days |

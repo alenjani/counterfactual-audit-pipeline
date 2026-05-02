@@ -138,6 +138,47 @@ Once the full instrument is built and analyzed:
 | Buffer (debugging, re-runs, cluster STOCKOUT idle) | ~$500 |
 | **Total** | **~$3,000** |
 
+## Performance optimization phase (added 2026-05-02)
+
+Decomposition of the observed 3.5 min/image throughput on L4:
+
+| segment | est. time | % |
+|---|---|---|
+| 40-step diffusion forward pass | ~140s | 67% |
+| Per-image actor overhead (suspicious — TBD) | ~30-60s | ~25% |
+| Prompt encoding (T5 + CLIP on CPU) | ~5-8s | 3% |
+| Control image preprocessing (OpenPose) | ~3-5s | 2% |
+| VAE decode | ~3s | 1% |
+| PNG write | ~0.05s | <0.1% |
+
+**PNG I/O is NOT the bottleneck** — switching storage format (TFRecord, Parquet, HDF5) would save zero compute. The bottleneck is GPU matmul, capped by the L4 + no-Marlin constraint.
+
+### Two cheap wins to investigate before launching the full run
+
+1. **Profile per-image actor overhead.** The 30-60s "non-compute" segment is suspicious. Candidates:
+   - antelopev2 face encoder reloading per image (should be cached)
+   - Ray IPC pickling of intermediate tensors
+   - PyTorch CUDA stream sync delay
+   - Volume FUSE write latency (already measured low)
+   
+   **Implementation**: add timing instrumentation to `FluxActor.generate()` at each segment boundary; run on 5-10 images on the smoke set; identify the largest segment. If a clear culprit is found and fixable: 0-20% speedup possible.
+
+2. **Cache T5 + CLIP embeddings per unique prompt.** Within a 600-image MVP, there are ~12 unique prompt strings (12 axis combos × constant fixed_attributes), each used for ~50 images. Currently each call re-encodes the prompt from scratch (~5-8s per image on CPU). Hash-based memoization would give ~98% cache hit rate.
+   
+   **Implementation**: wrap the T5/CLIP encoder calls with a `lru_cache` keyed on the prompt string (or a hash of it). Trivial code change.
+   **Expected win**: ~3-5% speedup (~4-7s/image saved).
+
+### Larger opportunities (require hardware change)
+
+| optimization | speedup | trade-off |
+|---|---|---|
+| 4× A100 80GB cluster | ~4× | ~$1500-2500 extra; could justify if calendar gets tight |
+| Marlin enabled (only on A100) | ~1.3× (incl. in 4×) | Same as A100 swap |
+| Batch size > 1 (only on A100) | ~1.5-2× | Same as A100 swap |
+| `xformers` flash attention | ~1.1-1.2× | already partially via PyTorch 2.x; check what's enabled |
+
+**Path-to-A100 decision point**: after MVP-7 finishes, profile + apply T5 cache, then re-estimate full-run wall. If still > 4 weeks calendar projected, propose A100 swap.
+
 ## Outstanding decisions (needs user input)
 
 - Whether to start the full run NOW (after MVP validates) or wait for: (a) cloud auditor API credentials, (b) license decision, (c) IRB determination. Recommendation: start generation while those proceed in parallel — generation doesn't depend on them.
