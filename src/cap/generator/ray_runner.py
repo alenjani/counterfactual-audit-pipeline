@@ -1,6 +1,6 @@
 """Ray-based distributed runner for fan-out generation across multiple GPUs.
 
-Wraps `FluxPuLIDControlNetGenerator` in a Ray actor (one per GPU) and uses
+Wraps `FluxPuLIDNativeGenerator` in a Ray actor (one per GPU) and uses
 `ray.util.ActorPool.map_unordered` to distribute `GenerationRequest`s across
 the actor pool. Each actor holds Flux + ControlNet + PuLID + InsightFace in
 VRAM; requests are streamed in, images written to `output_dir`, results
@@ -43,7 +43,7 @@ class FluxActor:
 
     def __init__(
         self,
-        dtype: str = "nf4",
+        dtype: str = "fp8",  # informational only; FluxPuLIDNativeGenerator hardcodes FP8 path
         controlnet_mode: str = "pose",
         cache_dir: str = "/local_disk0/hf_cache",
         hf_token: str | None = None,
@@ -52,6 +52,7 @@ class FluxActor:
     ):
         import os
         import sys
+        from pathlib import Path
 
         os.environ["HF_HOME"] = cache_dir
         os.environ["HUGGINGFACE_HUB_CACHE"] = cache_dir
@@ -59,19 +60,36 @@ class FluxActor:
         # HF Hub's xet downloader fails on GCS-FUSE Volumes ("File too large,
         # os error 27"). Force plain HTTP download until xet supports FUSE.
         os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+        # Faster downloads of large weight files (12 GB FP8 Flux etc).
+        os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
+        # quanto JIT-compile cache: /dev/shm (32 GB tmpfs) avoids /local_disk0
+        # filling up after Flux + PuLID + antelopev2 downloads.
+        os.environ.setdefault("TORCH_EXTENSIONS_DIR", "/dev/shm/torch_extensions")
+        os.environ.setdefault("TMPDIR", "/dev/shm/tmp")
+        Path("/dev/shm/torch_extensions").mkdir(parents=True, exist_ok=True)
+        Path("/dev/shm/tmp").mkdir(parents=True, exist_ok=True)
+        # Reduce CUDA fragmentation on the L4.
+        os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
         if hf_token:
             os.environ["HF_TOKEN"] = hf_token
             os.environ["HUGGING_FACE_HUB_TOKEN"] = hf_token
         if pulid_src and pulid_src not in sys.path:
             sys.path.insert(0, pulid_src)
 
-        from cap.generator import FluxPuLIDControlNetGenerator
+        from cap.generator import FluxPuLIDNativeGenerator
 
-        self.generator = FluxPuLIDControlNetGenerator(
-            dtype=dtype,
+        # FluxPuLIDNativeGenerator (the architectural fix validated 2026-05-01)
+        # uses PuLID's native Flux + a monkey-patched forward that honors BOTH
+        # pulid_ca id-injection AND diffusers ControlNet residuals. Replaces
+        # the broken FluxPuLIDControlNetGenerator that silently fell back to
+        # text-only Flux because diffusers' FluxTransformer2DModel doesn't
+        # honor pulid_ca attributes (Review 001 §4 / preserved_fraction = 0).
+        self.generator = FluxPuLIDNativeGenerator(
+            flux_model_name="flux-dev",
             controlnet_mode=controlnet_mode,
             cache_dir=cache_dir,
             face_model_name=face_model_name,
+            use_fp8=True,
         )
 
     def warm(self) -> dict[str, Any]:
@@ -130,7 +148,7 @@ def run_distributed(
     `manifest_path` is given, each result is also appended as a JSONL line
     to that file (durable, resumable across cluster crashes).
 
-    Idempotency: the underlying `FluxPuLIDControlNetGenerator.generate` skips
+    Idempotency: the underlying `FluxPuLIDNativeGenerator.generate` skips
     images that already exist in `output_dir`, so re-running this with the
     same requests + output_dir is safe — only missing images get generated.
     """
