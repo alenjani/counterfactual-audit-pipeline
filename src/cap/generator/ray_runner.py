@@ -111,13 +111,28 @@ class FluxActor:
 
     def warm(self) -> dict[str, Any]:
         """Force model load. Called once per actor before the first generate."""
+        import os
         import time
+        from pathlib import Path
 
         import torch
 
-        t0 = time.time()
-        self.generator._lazy_load()
-        load_s = time.time() - t0
+        # PuLID's load_pretrain (and PuLIDPipeline.__init__) use relative
+        # `local_dir='models'` paths for hf_hub_download — they land in CWD.
+        # Default CWD on a Ray actor is on a non-writable / FUSE filesystem
+        # depending on cluster config; explicitly chdir to a /local_disk0
+        # workdir so all PuLID-relative writes go somewhere fast and writable.
+        pulid_workdir = Path("/local_disk0/pulid_workdir")
+        pulid_workdir.mkdir(parents=True, exist_ok=True)
+        saved_cwd = os.getcwd()
+        os.chdir(pulid_workdir)
+        try:
+            t0 = time.time()
+            self.generator._lazy_load()
+            load_s = time.time() - t0
+        finally:
+            os.chdir(saved_cwd)
+
         vram_mb = torch.cuda.memory_allocated() / 1e6 if torch.cuda.is_available() else 0
         return {
             "load_s": round(load_s, 1),
