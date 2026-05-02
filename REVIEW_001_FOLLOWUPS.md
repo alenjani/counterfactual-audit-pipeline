@@ -4,6 +4,24 @@ Tracker for the four remaining items the reviewer flagged. Updated by the
 autonomous run on 2026-05-01 after the FluxPuLIDNativeGenerator architectural
 fix was validated (diagnostic run 13296386370223; preserved cosine 0.63–0.75).
 
+## Configuration deviations from the prior MVP
+
+Documenting where the production config now differs from the pre-Review-001
+MVP, so the reviewer / future-you can see what changed and why:
+
+| Knob | Pre-review | Post-review | Why |
+|---|---|---|---|
+| Generator | `FluxPuLIDControlNetGenerator` (diffusers + PuLID hooks attached) | `FluxPuLIDNativeGenerator` (PuLID's native Flux + monkey-patched forward) | The diffusers transformer doesn't honor `pulid_ca` attributes — root cause of `preserved_fraction = 0`. The native Flux class does. |
+| Quantization | NF4 (4-bit) | FP8 (8-bit, optimum-quanto) | CLAUDE.md item 3 prefers FP8 (closer to BF16 quality); NF4 was a workaround for an OOM that no longer occurs with the low-peak loader. |
+| Resolution | 1024² | **768²** | FP8 Flux + FP8 ControlNet + PuLID adapter at 1024² peaks ~22.5 GB on a 22-GB usable L4 → would OOM. CLAUDE.md item 4 floor is 768². Auditors (DeepFace, InsightFace, AWS, etc.) internally resize to 112–224 px, so the comparison-side input is unchanged. |
+| Auditors | DeepFace only | DeepFace + InsightFace | Cross-system H2 needs ≥ 2 auditors. |
+| Driver host | g2-standard-16 (64 GB RAM) | g2-standard-32 (128 GB RAM) | FP8 Flux + ControlNet load peaked > 27 GB on Python heap; the smaller driver couldn't fit it past JVM/Spark overhead. Same L4 GPU. |
+| Marlin FP8 kernel | enabled by default | **disabled** via monkey-patch | Marlin's per-layer packing peaks ~3× weight on GPU; cumulative load OOM'd the L4. Plain FP8 matmul ~25-30% slower; net effect: ~9 hr MVP wall time instead of ~7 hr. |
+
+**Net direction:** generator quality went up (PuLID actually fires), quantization went up (FP8 > NF4), auditor coverage went up (2 vs 1), resolution went down (1024 → 768). The resolution change is the only quality-direction regression. Auditees consume ≤ 224 px regardless, so it's not load-bearing for the statistical claims; the only impact is that paper-figure thumbnails will be 768×768.
+
+**Path back to 1024² if needed:** revert quantization to NF4 — fits at 1024² with FP8 ControlNet on the L4. CLAUDE.md item 3 explicitly permits NF4 when L4 doesn't fit FP8, which is now the case at 1024². Alternatively, use a bigger GPU (A100/H100) for production figures only.
+
 ## ✅ Completed (autonomous, this session)
 
 ### 1. Identity preservation (`preserved_fraction = 0.0`)
