@@ -1,0 +1,103 @@
+# MVP run — small-scale validation that the full pipeline works end-to-end.
+# 50 seed identities × 12 counterfactual variations (6 skin tones × 2 genders) = 600 images.
+# 1 auditor (DeepFace, free + local) for fastest iteration.
+#
+# Hardware target: 4× L4 GPUs on Databricks (cluster 6106-192556-lj0uddmy)
+# Expected runtime: ~75 min on 4 actors (warm Volume cache), ~3-5 hr on 1 GPU.
+#
+# Validated against the smoke notebook (notebooks/01_databricks_ray_smoke.ipynb)
+# on 2026-04-28: NF4 + Flux + ControlNet + PuLID + antelopev2 + 1024² fits the L4.
+
+run_id: mvp_${env:USER}_${date:%Y%m%d}
+seed: 42
+
+paths:
+  # Volume-backed paths (CLAUDE.md storage tier "working storage"). Seed images
+  # MUST be on the Volume — Ray actors run on different worker nodes, so the
+  # driver's relative working dir is not visible to them. Volume paths are
+  # globally addressable from any node on the cluster.
+  seed_dataset: /Volumes/ds_work/alenj00/cap_cache/seeds/fairface
+  output_dir: /Volumes/ds_work/alenj00/cap_cache/runs/mvp_v2
+  generated_dir: /Volumes/ds_work/alenj00/cap_cache/runs/mvp_v2/generated
+  validation_dir: /Volumes/ds_work/alenj00/cap_cache/runs/mvp_v2/validation
+  audit_dir: /Volumes/ds_work/alenj00/cap_cache/runs/mvp_v2/audit
+  analysis_dir: /Volumes/ds_work/alenj00/cap_cache/runs/mvp_v2/analysis
+  viz_dir: /Volumes/ds_work/alenj00/cap_cache/runs/mvp_v2/viz
+
+generator:
+  backend: flux_pulid_native         # FluxPuLIDNativeGenerator (architectural
+                                     # fix validated 2026-05-01). Replaces the
+                                     # broken FluxPuLIDControlNetGenerator that
+                                     # silently fell back to text-only Flux.
+  device: cuda
+  dtype: fp8                         # FluxPuLIDNativeGenerator uses optimum-quanto
+                                     # FP8 with a custom low-peak loader + Marlin
+                                     # disabled to fit on the 22 GB L4. NF4 only
+                                     # if FP8 stops fitting (CLAUDE.md item 3).
+  controlnet_mode: pose              # required; canny/depth would confound
+                                     # demographic-correlated edges.
+  face_model_name: antelopev2        # ArcFace r100 + WebFace42M; required for
+                                     # tight identity-preservation measurement.
+  num_inference_steps: 40            # 28→40 to lift identity preservation:
+                                     # MVP-6 mean cosine 0.578 (preserved 80%);
+                                     # paper-grade target ≥ 0.65 / ≥ 90% needs
+                                     # more denoising steps.
+  guidance_scale: 3.5
+  id_weight: 1.5                     # PuLID identity strength. Default 1.0
+                                     # gave 80% preserved; 1.5 trades ~5%
+                                     # ControlNet adherence for ~10% identity
+                                     # preservation (community-validated).
+  controlnet_conditioning_scale: 0.6 # Pose ControlNet strength (unchanged).
+  width: 768                         # CLAUDE.md item 4 floor. Validated at 768
+                                     # in diag run 13296386370223. 1024² with
+                                     # FP8 + FP8 CN + PuLID is ~22.5 GB → OOM.
+  height: 768
+
+seed_identities:
+  source: fairface
+  count: 50
+  stratify_by: [race, gender, age]   # balanced sample
+
+counterfactual_axes:
+  skin_tone: [1, 2, 3, 4, 5, 6]      # Fitzpatrick I–VI
+  gender: [male, female]
+
+fixed_attributes:
+  pose: frontal
+  expression: neutral expression
+  lighting: soft even studio lighting
+
+validators:
+  identity:
+    enabled: true
+    threshold: 0.5
+  fid:
+    enabled: false                   # skip for MVP
+  attributes:
+    enabled: true
+
+auditors:
+  # DeepFace + InsightFace — both local, no API keys. Two auditors enables
+  # cross-system H2 comparison (Review 001 §4 follow-up). Cloud auditors
+  # (aws_rekognition, azure_face, face_plus_plus, google_vision) are
+  # registered in src/cap/auditors/registry.py and ready to drop in here
+  # once API credentials are stored as Databricks secrets.
+  - name: deepface
+    kwargs:
+      detector_backend: retinaface
+  - name: insightface
+    kwargs:
+      model_name: buffalo_l
+
+tasks:
+  - gender
+  - age
+
+analysis:
+  fdr_alpha: 0.05
+  bootstrap_iters: 1000
+
+viz:
+  formats: [pdf, png]
+  dpi: 300
+  build_interactive_dashboard: true
