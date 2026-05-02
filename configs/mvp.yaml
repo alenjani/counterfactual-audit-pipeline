@@ -69,9 +69,17 @@ validators:
     enabled: true
 
 auditors:
+  # DeepFace + InsightFace — both local, no API keys. Two auditors enables
+  # cross-system H2 comparison (Review 001 §4 follow-up). Cloud auditors
+  # (aws_rekognition, azure_face, face_plus_plus, google_vision) are
+  # registered in src/cap/auditors/registry.py and ready to drop in here
+  # once API credentials are stored as Databricks secrets.
   - name: deepface
     kwargs:
       detector_backend: retinaface
+  - name: insightface
+    kwargs:
+      model_name: buffalo_l
 
 tasks:
   - gender
