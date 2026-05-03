@@ -40,6 +40,7 @@ STAGE_TARGETS = {
 
 # Notebook job templates (paths on Databricks workspace).
 PREFILTER_NOTEBOOK = "/Users/alenj00@safeway.com/counterfactual-audit-pipeline/notebooks/09_databricks_prefilter_seeds"
+BALANCE_NOTEBOOK = "/Users/alenj00@safeway.com/counterfactual-audit-pipeline/notebooks/10_databricks_balance_seeds"
 GEN_NOTEBOOK = "/Users/alenj00@safeway.com/counterfactual-audit-pipeline/notebooks/02_databricks_mvp_run"
 HF_PUBLISH_NOTEBOOK = "/Users/alenj00@safeway.com/counterfactual-audit-pipeline/notebooks/08_databricks_stage_publish_to_hf"
 
@@ -47,6 +48,9 @@ HF_PUBLISH_NOTEBOOK = "/Users/alenj00@safeway.com/counterfactual-audit-pipeline/
 GENERATED_DIR = "/Volumes/ds_work/alenj00/cap_cache/runs/full/generated"
 SEED_FILTER_DIR = "/Volumes/ds_work/alenj00/cap_cache/runs/full/seed_filter"
 CONFIRMED_SEEDS_FILE = f"{SEED_FILTER_DIR}/confirmed_seeds.json"
+# Stage A consumes the BALANCED list (output of A0b) — falls back to the raw
+# A0 list if balance step is skipped.
+BALANCED_SEEDS_FILE = f"{SEED_FILTER_DIR}/confirmed_seeds_balanced.json"
 
 # Per-submission caps.
 JOB_TIMEOUT_S = 17 * 3600          # 17 hr (under Databricks's 18-hr cap)
@@ -75,7 +79,7 @@ def submit_generation(cluster_id: str, profile: str) -> int:
                 "base_parameters": {
                     "config_path": "/Workspace/Users/alenj00@safeway.com/counterfactual-audit-pipeline/configs/full.yaml",
                     "priority_mode": "paper1_first",
-                    "seed_ids_file": CONFIRMED_SEEDS_FILE,
+                    "seed_ids_file": BALANCED_SEEDS_FILE,
                 },
             },
             "timeout_seconds": JOB_TIMEOUT_S,
@@ -217,6 +221,43 @@ def run_prefilter(cluster_id: str, profile: str) -> bool:
     return result == "SUCCESS"
 
 
+def run_balance(cluster_id: str, profile: str) -> bool:
+    """Phase A0b: check + adaptively rebalance the confirmed-seeds list.
+
+    Idempotent: notebook 10 runs the balance check; if --rebalance is on
+    and any cell is underfilled, it iteratively oversamples + re-prefilters
+    until balanced (or max iterations). Always writes confirmed_seeds_balanced.json.
+    """
+    print("\n=== Phase A0b: balance check + adaptive rebalance ===")
+    job_spec = {
+        "run_name": "cap_balance_seeds",
+        "tasks": [{
+            "task_key": "balance",
+            "existing_cluster_id": cluster_id,
+            "notebook_task": {
+                "notebook_path": BALANCE_NOTEBOOK,
+                "base_parameters": {
+                    "config_path": "/Workspace/Users/alenj00@safeway.com/counterfactual-audit-pipeline/configs/full.yaml",
+                    "confirmed_seeds_file": CONFIRMED_SEEDS_FILE,
+                    "output_dir": SEED_FILTER_DIR,
+                    "target_per_cell": "14",
+                    "max_iterations": "5",
+                    "extra_per_iteration": "50",
+                },
+            },
+            "timeout_seconds": 5 * 3600,
+        }],
+    }
+    spec_path = "/tmp/cap_balance_job.json"
+    with open(spec_path, "w") as f:
+        json.dump(job_spec, f)
+    out = databricks("jobs", "submit", "--no-wait", "--json", f"@{spec_path}", profile=profile)
+    run_id = int(json.loads(out)["run_id"])
+    print(f"Phase A0b submitted: run {run_id}")
+    life, result = poll_run(run_id, profile)
+    return result == "SUCCESS"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--stage", choices=["a", "b", "c", "all"], required=True)
@@ -224,6 +265,8 @@ def main() -> int:
     parser.add_argument("--profile", default="dev")
     parser.add_argument("--skip-prefilter", action="store_true",
                         help="Skip the A0 prefilter step (assume confirmed_seeds.json already exists)")
+    parser.add_argument("--skip-balance", action="store_true",
+                        help="Skip the A0b balance/rebalance step")
     args = parser.parse_args()
 
     stages_to_run = ["A", "B", "C"] if args.stage == "all" else [args.stage.upper()]
@@ -233,6 +276,13 @@ def main() -> int:
         ok = run_prefilter(args.cluster_id, args.profile)
         if not ok:
             print("Aborting: prefilter failed.", file=sys.stderr)
+            return 1
+
+    # Phase A0b: balance + adaptive rebalance — produces confirmed_seeds_balanced.json
+    if "A" in stages_to_run and not args.skip_balance:
+        ok = run_balance(args.cluster_id, args.profile)
+        if not ok:
+            print("Aborting: balance step failed.", file=sys.stderr)
             return 1
 
     for st in stages_to_run:
