@@ -38,7 +38,17 @@ logger = get_logger()
 
 @click.command()
 @click.option("--config", "config_path", required=True)
-def main(config_path: str) -> None:
+@click.option(
+    "--with-preserved-filter/--no-preserved-filter",
+    default=True,
+    help=(
+        "Phase 12b: after the main analysis on all cells, also run a parallel "
+        "analysis restricted to identity-preserved cells (cosine ≥ 0.5). "
+        "Output files get a `_preserved` suffix. Disambiguates auditor bias "
+        "from generator artifact."
+    ),
+)
+def main(config_path: str, with_preserved_filter: bool) -> None:
     cfg = load_config(config_path)
     analysis_dir = Path(cfg["paths.analysis_dir"])
     analysis_dir.mkdir(parents=True, exist_ok=True)
@@ -288,10 +298,184 @@ def main(config_path: str) -> None:
     else:
         logger.info(f"No identity scores found at {id_path} — skipping identity summary.")
 
+    # ---- 7. Phase 12b: re-run all tests on the identity-preserved subset ----
+    # If validation parquet is present and the flag is set, filter predictions
+    # to cells where cosine_similarity >= 0.5 (identity preserved) and re-run
+    # H1/H2/H3 + flip rates + intersectional. Output filenames get a
+    # `_preserved` suffix. Comparing _all vs _preserved disambiguates whether
+    # apparent bias is auditor bias (persists under filter) or generator
+    # artifact (vanishes under filter).
+    if with_preserved_filter and id_path.exists():
+        idd = pd.read_parquet(id_path)
+        if "is_preserved" not in idd.columns:
+            idd["is_preserved"] = (idd["cosine_similarity"] >= 0.5).astype(int)
+        preserved_ids = set(idd[idd["is_preserved"].astype(bool)]["counterfactual_id"].tolist())
+
+        before = len(predictions)
+        predictions_p = predictions[predictions["counterfactual_id"].isin(preserved_ids)].copy()
+        after = len(predictions_p)
+        logger.info(
+            f"[Phase 12b] preserved-filter: {after}/{before} predictions kept "
+            f"({100*after/before:.1f}%)"
+        )
+
+        if after >= 30:  # arbitrary minimum to attempt the tests
+            df_p = predictions_p.copy()
+            df_p["error"] = np.where(
+                (df_p["task"] == "gender") & has_gender,
+                (df_p["prediction"].astype(str).str.lower() != df_p["axis_gender"].astype(str).str.lower()).astype(int),
+                np.nan,
+            )
+            preserved_results = _run_hypothesis_tests(
+                predictions_p, df_p, has_skin_tone, has_gender,
+                analysis_dir, fdr_alpha, suffix="_preserved",
+            )
+            results["preserved_filter"] = preserved_results
+            logger.info(
+                f"[Phase 12b] preserved-filter analyses written with `_preserved` suffix; "
+                f"summary nested under `preserved_filter`"
+            )
+        else:
+            logger.warning(f"[Phase 12b] only {after} preserved predictions — skipping (need ≥ 30)")
+
     manifest.finish()
     manifest.write(analysis_dir / "run_manifest.json")
     (analysis_dir / "summary.json").write_text(json.dumps(results, indent=2, default=str))
     logger.info(f"Analysis complete. Outputs in {analysis_dir}")
+
+
+def _run_hypothesis_tests(
+    predictions: pd.DataFrame,
+    df: pd.DataFrame,
+    has_skin_tone: bool,
+    has_gender: bool,
+    analysis_dir: Path,
+    fdr_alpha: float,
+    suffix: str = "",
+) -> dict:
+    """Run H1, H2, H3 + flip rates + intersectional tables. Used for both the
+    full population (suffix='') and the preserved subset (suffix='_preserved').
+
+    Returns a results dict with the same keys as the inline analysis, so
+    callers can nest it in summary.json under e.g. `preserved_filter`.
+    """
+    results: dict = {}
+
+    # ---- 1. Coarse and pairwise flip rates ---------------------------------
+    flip_rows = []
+    pairwise_rows = []
+    for (auditor, task), sub in predictions.groupby(["auditor", "task"]):
+        coarse = counterfactual_flip_rate(sub).iloc[0]
+        flip_rows.append({
+            "auditor": auditor, "task": task,
+            "coarse_flip_rate": float(coarse["flip_rate"]),
+            "n_identities": int(coarse["n_identities"]),
+        })
+        pw = pairwise_flip_rate(sub)
+        if len(pw):
+            pairwise_rows.append({
+                "auditor": auditor, "task": task,
+                "mean_pairwise_flip_rate": float(pw["pairwise_flip_rate"].mean()),
+                "median_pairwise_flip_rate": float(pw["pairwise_flip_rate"].median()),
+                "std_pairwise_flip_rate": float(pw["pairwise_flip_rate"].std()),
+                "n_identities": int(len(pw)),
+            })
+    pd.DataFrame(flip_rows).to_csv(analysis_dir / f"flip_rates{suffix}.csv", index=False)
+    pd.DataFrame(pairwise_rows).to_csv(analysis_dir / f"pairwise_flip_rates{suffix}.csv", index=False)
+    results["flip_rates"] = flip_rows
+    results["pairwise_flip_rates"] = pairwise_rows
+
+    # ---- 3. H1 ANOVA (auto-routes to logit for binary DV) -------------------
+    anova_rows = []
+    if has_skin_tone and has_gender:
+        for (auditor, task), sub in predictions.groupby(["auditor", "task"]):
+            if task != "gender":
+                continue
+            sub2 = df[(df["auditor"] == auditor) & (df["task"] == task)].copy()
+            sub2 = sub2.dropna(subset=["error"])
+            if sub2["error"].nunique() < 2:
+                continue
+            try:
+                aov = two_way_anova(sub2, dv="error", factor_a="axis_skin_tone", factor_b="axis_gender")
+                interaction = aov[aov["Source"].str.contains("axis_skin_tone \\* axis_gender", regex=True)]
+                p_int = float(interaction.iloc[0]["p-unc"]) if len(interaction) else float("nan")
+                anova_rows.append({
+                    "auditor": auditor, "task": task,
+                    "p_skin_tone": float(aov[aov["Source"] == "axis_skin_tone"].iloc[0]["p-unc"]),
+                    "p_gender": float(aov[aov["Source"] == "axis_gender"].iloc[0]["p-unc"]),
+                    "p_interaction": p_int,
+                    "n": len(sub2),
+                })
+            except Exception as e:
+                logger.warning(f"H1 (suffix={suffix or 'all'}) failed for {auditor}/{task}: {e}")
+    anova_df = pd.DataFrame(anova_rows)
+    if len(anova_df):
+        rejected, corrected = fdr_correct(anova_df["p_interaction"].fillna(1.0).tolist(), alpha=fdr_alpha)
+        anova_df["p_interaction_fdr"] = corrected
+        anova_df["H1_supported"] = rejected
+    anova_df.to_csv(analysis_dir / f"h1_anova{suffix}.csv", index=False)
+    results["h1_anova"] = anova_df.to_dict(orient="records")
+
+    # ---- 4. H2 McNemar's ---------------------------------------------------
+    mcn_rows = []
+    if has_skin_tone:
+        for (auditor, task), sub in predictions.groupby(["auditor", "task"]):
+            if task != "gender":
+                continue
+            sub2 = df[(df["auditor"] == auditor) & (df["task"] == task)].copy()
+            sub2 = sub2.dropna(subset=["error"])
+            try:
+                res = mcnemars_paired(
+                    sub2, pair_col="seed_identity_id", condition_col="axis_skin_tone",
+                    outcome_col="error", cond_a_value=1, cond_b_value=6,
+                )
+                mcn_rows.append({"auditor": auditor, "task": task, **res})
+            except Exception as e:
+                logger.warning(f"H2 (suffix={suffix or 'all'}) failed for {auditor}/{task}: {e}")
+    mcn_df = pd.DataFrame(mcn_rows)
+    if len(mcn_df):
+        rejected, corrected = fdr_correct(mcn_df["pvalue"].fillna(1.0).tolist(), alpha=fdr_alpha)
+        mcn_df["pvalue_fdr"] = corrected
+        mcn_df["H2_supported"] = rejected
+    mcn_df.to_csv(analysis_dir / f"h2_mcnemars{suffix}.csv", index=False)
+    results["h2_mcnemars"] = mcn_df.to_dict(orient="records")
+
+    # ---- 5. H3 ordinal logit -----------------------------------------------
+    logit_rows = []
+    if has_skin_tone:
+        for (auditor, task), sub in predictions.groupby(["auditor", "task"]):
+            if task != "gender":
+                continue
+            sub2 = df[(df["auditor"] == auditor) & (df["task"] == task)].copy()
+            sub2 = sub2.dropna(subset=["error"]).assign(
+                axis_skin_tone=lambda d: d["axis_skin_tone"].astype(int),
+                gender_num=lambda d: (d["axis_gender"].astype(str).str.lower() == "female").astype(int),
+            )
+            if sub2["error"].nunique() < 2:
+                continue
+            try:
+                model = ordinal_logit_skin_tone(
+                    sub2, skin_tone_col="axis_skin_tone", error_col="error",
+                    covariates=["gender_num"],
+                )
+                logit_rows.append({
+                    "auditor": auditor, "task": task,
+                    "skin_tone_coef": float(model.params["axis_skin_tone"]),
+                    "skin_tone_p": float(model.pvalues["axis_skin_tone"]),
+                    "skin_tone_odds_ratio": float(np.exp(model.params["axis_skin_tone"])),
+                    "n": int(model.nobs),
+                })
+            except Exception as e:
+                logger.warning(f"H3 (suffix={suffix or 'all'}) failed for {auditor}/{task}: {e}")
+    logit_df = pd.DataFrame(logit_rows)
+    if len(logit_df):
+        rejected, corrected = fdr_correct(logit_df["skin_tone_p"].fillna(1.0).tolist(), alpha=fdr_alpha)
+        logit_df["skin_tone_p_fdr"] = corrected
+        logit_df["H3_supported"] = rejected
+    logit_df.to_csv(analysis_dir / f"h3_ordinal_logit{suffix}.csv", index=False)
+    results["h3_ordinal_logit"] = logit_df.to_dict(orient="records")
+
+    return results
 
 
 if __name__ == "__main__":
