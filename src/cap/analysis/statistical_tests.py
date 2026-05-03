@@ -14,10 +14,86 @@ def two_way_anova(
     factor_a: str,
     factor_b: str,
 ) -> pd.DataFrame:
-    """Two-way ANOVA via pingouin for clean output."""
-    import pingouin as pg
+    """Two-way analysis with main + interaction effects.
 
+    Auto-routes to the right model:
+    - **Continuous DV** → pingouin's classical two-way ANOVA.
+    - **Binary DV** (only {0, 1} values) → logistic regression with the same
+      `factor_a * factor_b` design, returned as a same-shape `Source / p-unc`
+      DataFrame so callers don't change. ANOVA on a binary DV is misspecified
+      and tends to fail with `LinAlgError: Singular matrix` whenever any cell
+      has zero residual variance (which happens routinely with small per-cell
+      samples + low error rate).
+
+    Output schema:
+        DataFrame with columns ['Source', 'p-unc', 'F', 'np2'] (np2 left as
+        NaN for the binary path, which doesn't have an η²-equivalent).
+        `Source` values include factor_a, factor_b, and the interaction
+        `f"{factor_a} * {factor_b}"` — caller code in analyze.py searches
+        these names so they must be preserved.
+    """
+    is_binary = (
+        df[dv].dropna().isin([0, 1, 0.0, 1.0]).all()
+        and df[dv].nunique(dropna=True) <= 2
+    )
+    if is_binary:
+        return _two_way_logit(df, dv, factor_a, factor_b)
+    import pingouin as pg
     return pg.anova(data=df, dv=dv, between=[factor_a, factor_b], detailed=True)
+
+
+def _two_way_logit(
+    df: pd.DataFrame, dv: str, factor_a: str, factor_b: str
+) -> pd.DataFrame:
+    """Two-way logistic regression with interaction. Returns ANOVA-shaped DF.
+
+    Wald test p-values for the joint contribution of each factor (and the
+    interaction) — comparable to ANOVA p-values for screening purposes.
+    """
+    import statsmodels.formula.api as smf
+
+    # Sanitize DV + factor names for patsy: only alnum + underscore
+    sub = df[[dv, factor_a, factor_b]].dropna().copy()
+    sub[factor_a] = sub[factor_a].astype("category")
+    sub[factor_b] = sub[factor_b].astype("category")
+    sub[dv] = sub[dv].astype(int)
+
+    formula = f"{dv} ~ C({factor_a}) * C({factor_b})"
+    try:
+        result = smf.logit(formula, data=sub).fit(disp=False, maxiter=200)
+    except Exception as e:
+        # Fall through to a "test couldn't run" row so callers see something
+        return pd.DataFrame([
+            {"Source": factor_a, "p-unc": float("nan"), "F": float("nan"), "np2": float("nan")},
+            {"Source": factor_b, "p-unc": float("nan"), "F": float("nan"), "np2": float("nan")},
+            {"Source": f"{factor_a} * {factor_b}", "p-unc": float("nan"),
+             "F": float("nan"), "np2": float("nan"), "_error": str(e)[:200]},
+        ])
+
+    # Wald test for joint significance of each factor's coefficient set.
+    rows = []
+    for source, terms in [
+        (factor_a, [t for t in result.params.index if t.startswith(f"C({factor_a})") and ":" not in t]),
+        (factor_b, [t for t in result.params.index if t.startswith(f"C({factor_b})") and ":" not in t]),
+        (f"{factor_a} * {factor_b}", [t for t in result.params.index if ":" in t]),
+    ]:
+        if not terms:
+            rows.append({"Source": source, "p-unc": float("nan"), "F": float("nan"), "np2": float("nan")})
+            continue
+        try:
+            wald = result.wald_test(terms, scalar=True)
+            rows.append({
+                "Source": source,
+                "p-unc": float(wald.pvalue),
+                "F": float(wald.statistic),  # actually a chi-sq statistic; named F for schema parity
+                "np2": float("nan"),
+            })
+        except Exception as e:
+            rows.append({
+                "Source": source, "p-unc": float("nan"),
+                "F": float("nan"), "np2": float("nan"), "_error": str(e)[:200],
+            })
+    return pd.DataFrame(rows)
 
 
 def mcnemars_paired(
