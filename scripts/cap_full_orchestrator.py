@@ -73,7 +73,7 @@ def submit_generation(cluster_id: str, profile: str) -> int:
             "notebook_task": {
                 "notebook_path": GEN_NOTEBOOK,
                 "base_parameters": {
-                    "config_path": "configs/full.yaml",
+                    "config_path": "/Workspace/Users/alenj00@safeway.com/counterfactual-audit-pipeline/configs/full.yaml",
                     "priority_mode": "paper1_first",
                 },
             },
@@ -196,7 +196,7 @@ def run_prefilter(cluster_id: str, profile: str) -> bool:
             "notebook_task": {
                 "notebook_path": PREFILTER_NOTEBOOK,
                 "base_parameters": {
-                    "config_path": "configs/full.yaml",
+                    "config_path": "/Workspace/Users/alenj00@safeway.com/counterfactual-audit-pipeline/configs/full.yaml",
                     "candidates": "250",
                     "target_confirmed": "200",
                     "threshold": "0.5",
