@@ -615,27 +615,29 @@ class FluxPuLIDNativeGenerator(CounterfactualGenerator):
         uncond_id: Tensor | None,
         control_image_latent: Tensor | None,
     ) -> Image.Image:
-        """Custom denoise loop: ControlNet residuals + PuLID id injection per step."""
+        """Custom denoise loop: ControlNet residuals + PuLID id injection per step.
+
+        Per-segment timing is always collected and stashed on `self._last_timing`
+        for the caller to attach to GenerationResult.metadata. Cost is just a
+        few time.time() calls + 4 cuda.synchronize() (~ms) — negligible vs the
+        ~200s per image.
+        """
         get_noise = self._pulid_modules["get_noise"]
         get_schedule = self._pulid_modules["get_schedule"]
         prepare = self._pulid_modules["prepare"]
         unpack = self._pulid_modules["unpack"]
 
-        # 7a profiling: per-segment timing. Set CAP_TIME_DENOISE=1 to enable.
-        _profile = bool(os.environ.get("CAP_TIME_DENOISE"))
         _t = {}
-        if _profile:
-            import torch.cuda
-            torch.cuda.synchronize() if torch.cuda.is_available() else None
-            _t["start"] = time.time()
+        _cuda_avail = torch.cuda.is_available()
+        if _cuda_avail: torch.cuda.synchronize()
+        _t["start"] = time.time()
 
         torch.manual_seed(seed)
         # Noise on CPU initially (matches T5/CLIP); prepare runs on CPU; we
         # move the prepared tensors to GPU before the denoise loop.
         x = get_noise(1, height, width, device="cpu", dtype=self.weight_dtype, seed=seed)
         prep = prepare(t5=self._t5, clip=self._clip, img=x, prompt=prompt)
-        if _profile:
-            _t["after_prepare"] = time.time()
+        _t["after_prepare"] = time.time()
         timesteps = get_schedule(num_inference_steps, prep["img"].shape[1], shift=True)
 
         # Move prepared tensors to GPU for the inference loop
@@ -649,9 +651,8 @@ class FluxPuLIDNativeGenerator(CounterfactualGenerator):
             (img.shape[0],), guidance_scale, device=self.device, dtype=self.weight_dtype
         )
 
-        if _profile and torch.cuda.is_available():
-            torch.cuda.synchronize()
-            _t["after_to_gpu"] = time.time()
+        if _cuda_avail: torch.cuda.synchronize()
+        _t["after_to_gpu"] = time.time()
 
         for i, (t_curr, t_prev) in enumerate(zip(timesteps[:-1], timesteps[1:])):
             t_vec = torch.full((img.shape[0],), t_curr, dtype=self.weight_dtype, device=self.device)
@@ -685,9 +686,8 @@ class FluxPuLIDNativeGenerator(CounterfactualGenerator):
 
             img = img + (t_prev - t_curr) * pred
 
-        if _profile and torch.cuda.is_available():
-            torch.cuda.synchronize()
-            _t["after_denoise_loop"] = time.time()
+        if _cuda_avail: torch.cuda.synchronize()
+        _t["after_denoise_loop"] = time.time()
 
         # Decode latent → image. AE is on CPU; move final latent there.
         img = unpack(img.float(), height, width).cpu()
@@ -696,17 +696,20 @@ class FluxPuLIDNativeGenerator(CounterfactualGenerator):
         img = (img.clamp(-1, 1) + 1) / 2
         img = (img * 255).to(torch.uint8).cpu().numpy()[0].transpose(1, 2, 0)
 
-        if _profile:
-            _t["after_decode"] = time.time()
-            t0 = _t["start"]
-            logger.info(
-                f"[CAP_TIME] prepare={_t['after_prepare']-t0:.2f}s "
-                f"to_gpu={_t['after_to_gpu']-_t['after_prepare']:.2f}s "
-                f"denoise_loop({num_inference_steps}steps)={_t['after_denoise_loop']-_t['after_to_gpu']:.2f}s "
-                f"decode={_t['after_decode']-_t['after_denoise_loop']:.2f}s "
-                f"total={_t['after_decode']-t0:.2f}s"
-            )
+        _t["after_decode"] = time.time()
 
+        # Stash per-segment timing on the generator for the caller to attach
+        # to GenerationResult.metadata. Each value in seconds.
+        self._last_timing = {
+            "prepare_s": round(_t["after_prepare"] - _t["start"], 3),
+            "to_gpu_s": round(_t["after_to_gpu"] - _t["after_prepare"], 3),
+            "denoise_loop_s": round(_t["after_denoise_loop"] - _t["after_to_gpu"], 3),
+            "decode_s": round(_t["after_decode"] - _t["after_denoise_loop"], 3),
+            "denoise_total_s": round(_t["after_decode"] - _t["start"], 3),
+            "num_inference_steps": num_inference_steps,
+        }
+        if os.environ.get("CAP_TIME_DENOISE"):
+            logger.info(f"[CAP_TIME] {self._last_timing}")
         return Image.fromarray(img)
 
     # ------------------------------------------------------- request / generate
@@ -805,6 +808,9 @@ class FluxPuLIDNativeGenerator(CounterfactualGenerator):
                         "controlnet_mode": self.controlnet_mode,
                         "controlnet_conditioning_scale": self.controlnet_conditioning_scale,
                         "elapsed_s": round(elapsed, 2),
+                        # Per-segment timing for post-hoc throughput analysis
+                        # across the multi-day full run. See plans/003 phase 7a.
+                        **(getattr(self, "_last_timing", {}) or {}),
                     },
                 )
             )
