@@ -195,6 +195,41 @@ Decomposition of the observed 3.5 min/image throughput on L4:
 
 **Path-to-A100 decision point**: after MVP-7 finishes, profile + apply T5 cache, then re-estimate full-run wall. If still > 4 weeks calendar projected, propose A100 swap.
 
+## Bias-attribution additions (added 2026-05-02 after MVP-7 analysis)
+
+The MVP-7 analysis revealed a significant `axis_gender` main effect on auditor error rate (DeepFace p=0.003, InsightFace p=4.6e-5) but no skin-tone effect. The standard reviewer pushback would be:
+
+> "Are you measuring auditor bias, or is your generator just bad at rendering one gender?"
+
+Two cheap additions disambiguate this and turn either outcome into a publishable result.
+
+### Addition 1 — Real-image audit baseline
+
+Run the same 7 auditors × 7 tasks on the **original FairFace seed images** (no generation, known ground truth from FairFace metadata). Compare per-auditor error rate on (real photos, FairFace gold-standard labels) vs (synthetic counterfactuals, asserted axis values).
+
+| outcome | interpretation |
+|---|---|
+| Same error rate real vs synthetic | Bias is in the auditor, generator-independent |
+| Lower error on real, higher on synthetic | Generator introduces a confound; bias is partially the generator's fault |
+| Auditors right on real, wrong on synthetic | Pure generator artifact |
+
+Cost: 200 seeds × 7 auditors × ~$0.0015/image = ~$2.10. Wall: ~30 min (cloud auditors rate-limited).
+
+**Implementation TODO**: extend `cap-audit` CLI with a `--mode {synthetic,real_baseline,both}` flag. In `real_baseline` mode, the audit reads from `seed_identities` instead of `generated/manifest.parquet`. Writes to `audit/baseline_predictions.parquet`.
+
+### Addition 2 — `is_preserved` filter to all H1/H2/H3
+
+The validate step already computes per-cell ArcFace cosine. Add a covariate `is_preserved = (cosine >= 0.5)` to predictions, and re-run all hypothesis tests in two modes:
+
+- `analysis/<test>_all.csv` — current behavior, all 36K cells
+- `analysis/<test>_preserved.csv` — same tests on the subset where identity preserved (~85-95% depending on stage)
+
+If the bias signal **vanishes** when restricted to preserved cells, that's evidence the apparent bias was a generator failure mode, not auditor bias. If it **persists**, it's a real auditor effect that survives the cleaner subset — stronger publishable finding.
+
+**Implementation TODO**: extend `cap-analyze` to compute the join with validation, then run each statistical test twice (`is_preserved=any`, `is_preserved=true`). Output schema: add `_filter` column to existing CSVs, or write parallel `_preserved.csv` files.
+
+Both additions touch only `cli/audit.py` and `cli/analyze.py`. No changes to the generator or downstream notebooks. Implement after Stage A's first ~2,400 cells exist (so we can sanity-check the analysis code on real data).
+
 ## Outstanding decisions (needs user input)
 
 - Whether to start the full run NOW (after MVP validates) or wait for: (a) cloud auditor API credentials, (b) license decision, (c) IRB determination. Recommendation: start generation while those proceed in parallel — generation doesn't depend on them.

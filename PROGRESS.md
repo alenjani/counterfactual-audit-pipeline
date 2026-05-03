@@ -55,7 +55,9 @@ results/mvp_demo/                        ← First MVP outputs (April 2026, brok
 | 10C. Full gen — Stage C (+24,000 with seeds 137 + 2718 = 36,000 cumulative) | ⏳ | — | +14 days |
 | 10C-bk. HF backup → `cap-counterfactuals-stage-c` | ⏳ | — | ~75 min |
 | 11. Full audit (7 auditors × 36K images) | ⏳ | — | ~24 hr (bottlenecked by Google Vision rate limit) |
-| 12. Full analysis | ⏳ | — | <1 hr |
+| 11b. **Real-image audit baseline** (7 auditors × 200 FairFace seeds) | ⏳ | — | ~30 min, ~$2 — bias attribution control |
+| 12. Full analysis (H1/H2/H3 with logit fix) | ⏳ | — | <1 hr |
+| 12b. **`is_preserved` filter rerun** (every test in `_all` + `_preserved` modes) | ⏳ | — | <30 min — disentangles auditor vs generator bias |
 | 13. ISR paper drafting (Sept 7 deadline) | ⏳ | — | uses `paper_1_isr` slice |
 | 14. License + IRB | ⏳ user action | — | non-blocking; needed before publication |
 
