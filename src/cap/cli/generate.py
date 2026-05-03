@@ -261,16 +261,38 @@ def _build_priority_requests(seeds: list[dict], cfg, gen_cfg) -> list[Generation
 
 
 def _load_seed_identities(cfg) -> list[dict]:
-    """Load (or sample) FairFace seed identities per config."""
+    """Load (or sample) FairFace seed identities per config.
+
+    If `seed_identities.ids: [...]` is set, loads exactly those IDs (in order)
+    instead of stratified sampling. Used for targeted retests like the
+    id_weight=1.8 paired comparison on the 11 failing IDs from MVP-7.
+    """
     si_cfg = cfg["seed_identities"]
     if si_cfg.get("source") != "fairface":
         raise ValueError(f"Unsupported seed source: {si_cfg.get('source')}. Only 'fairface' is wired.")
-    seeds = load_or_sample_seeds(
+
+    # First load the full stratified set (we need it to look up per-ID metadata).
+    full = load_or_sample_seeds(
         output_dir=cfg["paths.seed_dataset"],
-        n=int(si_cfg["count"]),
+        n=int(si_cfg.get("count", 50)),
         stratify_by=list(si_cfg.get("stratify_by", ["race", "gender", "age"])),
         seed=cfg.get("seed", 42),
     )
+    by_id = {s.id: s for s in full}
+
+    # Override with explicit list if present.
+    explicit_ids = si_cfg.get("ids")
+    if explicit_ids:
+        missing = [i for i in explicit_ids if i not in by_id]
+        if missing:
+            # Fall back: rebuild the dataset with a larger n until we cover the missing IDs.
+            # Cheap shortcut — just re-sample with N = max(N, len(seed_pool)) — but if FairFace
+            # has the IDs at all, they should be in the pool from the original load.
+            raise ValueError(f"Requested seed IDs not in stratified pool: {missing}")
+        seeds = [by_id[i] for i in explicit_ids]
+    else:
+        seeds = full
+
     return [{"id": s.id, "image_path": s.image_path,
              "race": s.race, "gender": s.gender, "age": s.age} for s in seeds]
 
