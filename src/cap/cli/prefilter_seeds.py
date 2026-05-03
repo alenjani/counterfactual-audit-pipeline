@@ -155,9 +155,17 @@ def _step1_face_filter(seeds: list, cache_dir: str | None, hf_token: str | None)
         os.environ.setdefault("HF_HOME", cache_dir)
         os.environ.setdefault("HUGGINGFACE_HUB_CACHE", cache_dir)
 
+    # Pre-stage antelopev2 model files. insightface's FaceAnalysis(...) asserts
+    # 'detection' in self.models — that fails if the model isn't already on
+    # disk under <root>/models/antelopev2/. _ensure_antelopev2 downloads from
+    # the HF mirror with a GitHub fallback.
+    from cap.generator.flux_pulid import _ensure_antelopev2
+    insightface_root = str(Path("/local_disk0/pulid_workdir")) if Path("/local_disk0").exists() else "."
+    _ensure_antelopev2(insightface_root)
+
     app = FaceAnalysis(
         name="antelopev2",
-        root=str(Path("/local_disk0/pulid_workdir")) if Path("/local_disk0").exists() else ".",
+        root=insightface_root,
         providers=["CPUExecutionProvider"],
     )
     app.prepare(ctx_id=-1, det_size=(640, 640))
