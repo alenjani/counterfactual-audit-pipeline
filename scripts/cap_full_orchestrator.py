@@ -75,6 +75,7 @@ def submit_generation(cluster_id: str, profile: str) -> int:
                 "base_parameters": {
                     "config_path": "/Workspace/Users/alenj00@safeway.com/counterfactual-audit-pipeline/configs/full.yaml",
                     "priority_mode": "paper1_first",
+                    "seed_ids_file": CONFIRMED_SEEDS_FILE,
                 },
             },
             "timeout_seconds": JOB_TIMEOUT_S,
