@@ -111,6 +111,7 @@ cap-validate = "cap.cli.validate:main"
 cap-audit = "cap.cli.audit:main"
 cap-analyze = "cap.cli.analyze:main"
 cap-visualize = "cap.cli.visualize:main"
+cap-prefilter-seeds = "cap.cli.prefilter_seeds:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/cap"]

@@ -58,6 +58,15 @@ logger = get_logger()
     help="HF model cache dir. Override the per-actor default for Volume-backed cache.",
 )
 @click.option(
+    "--seed-ids-file",
+    default=None,
+    help=(
+        "Path to a JSON file containing a list of seed identity IDs to use "
+        "(typically the confirmed_seeds.json output of cap-prefilter-seeds). "
+        "If set, overrides seed_identities.count + stratification."
+    ),
+)
+@click.option(
     "--priority-mode",
     type=click.Choice(["none", "paper1_first"]),
     default="none",
@@ -76,6 +85,7 @@ def main(
     hf_token: str | None,
     pulid_src: str | None,
     cache_dir: str | None,
+    seed_ids_file: str | None,
     priority_mode: str,
 ) -> None:
     cfg = load_config(config_path)
@@ -91,6 +101,16 @@ def main(
     )
 
     gen_cfg = cfg["generator"]
+    # If --seed-ids-file is given, inject it as cfg.seed_identities.ids before loading.
+    if seed_ids_file:
+        with open(seed_ids_file) as f:
+            ids = json.load(f)
+        if not isinstance(ids, list) or not ids:
+            raise click.ClickException(f"--seed-ids-file must be a non-empty JSON list of IDs: {seed_ids_file}")
+        # Inject as a config override (mutates the in-memory cfg.seed_identities dict)
+        cfg["seed_identities"]["ids"] = ids
+        logger.info(f"--seed-ids-file: using {len(ids)} explicit IDs from {seed_ids_file}")
+
     seeds = _load_seed_identities(cfg)
     if limit is not None:
         seeds = seeds[:limit]
