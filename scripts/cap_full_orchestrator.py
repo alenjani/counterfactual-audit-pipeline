@@ -39,11 +39,14 @@ STAGE_TARGETS = {
 }
 
 # Notebook job templates (paths on Databricks workspace).
+PREFILTER_NOTEBOOK = "/Users/alenj00@safeway.com/counterfactual-audit-pipeline/notebooks/09_databricks_prefilter_seeds"
 GEN_NOTEBOOK = "/Users/alenj00@safeway.com/counterfactual-audit-pipeline/notebooks/02_databricks_mvp_run"
 HF_PUBLISH_NOTEBOOK = "/Users/alenj00@safeway.com/counterfactual-audit-pipeline/notebooks/08_databricks_stage_publish_to_hf"
 
-# Volume path (matches configs/full.yaml paths.generated_dir).
+# Volume paths (match configs/full.yaml).
 GENERATED_DIR = "/Volumes/ds_work/alenj00/cap_cache/runs/full/generated"
+SEED_FILTER_DIR = "/Volumes/ds_work/alenj00/cap_cache/runs/full/seed_filter"
+CONFIRMED_SEEDS_FILE = f"{SEED_FILTER_DIR}/confirmed_seeds.json"
 
 # Per-submission caps.
 JOB_TIMEOUT_S = 17 * 3600          # 17 hr (under Databricks's 18-hr cap)
@@ -179,14 +182,58 @@ def run_hf_backup(stage: str, cluster_id: str, profile: str) -> bool:
 START_TIME = time.time()
 
 
+def run_prefilter(cluster_id: str, profile: str) -> bool:
+    """Phase A0: prefilter seeds (idempotent — skip if confirmed_seeds.json exists)."""
+    # Idempotency check: if the confirmed-seeds list already exists, skip.
+    # The orchestrator can't directly read the Volume from the laptop, so we
+    # submit a tiny notebook to check. Cheap.
+    print("\n=== Phase A0: seed prefilter ===")
+    job_spec = {
+        "run_name": "cap_prefilter_seeds",
+        "tasks": [{
+            "task_key": "prefilter",
+            "existing_cluster_id": cluster_id,
+            "notebook_task": {
+                "notebook_path": PREFILTER_NOTEBOOK,
+                "base_parameters": {
+                    "config_path": "configs/full.yaml",
+                    "candidates": "250",
+                    "target_confirmed": "200",
+                    "threshold": "0.5",
+                    "output_dir": SEED_FILTER_DIR,
+                },
+            },
+            "timeout_seconds": 5 * 3600,
+        }],
+    }
+    spec_path = "/tmp/cap_prefilter_job.json"
+    with open(spec_path, "w") as f:
+        json.dump(job_spec, f)
+    out = databricks("jobs", "submit", "--no-wait", "--json", f"@{spec_path}", profile=profile)
+    run_id = int(json.loads(out)["run_id"])
+    print(f"Phase A0 submitted: run {run_id}")
+    life, result = poll_run(run_id, profile)
+    return result == "SUCCESS"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--stage", choices=["a", "b", "c", "all"], required=True)
     parser.add_argument("--cluster-id", required=True)
     parser.add_argument("--profile", default="dev")
+    parser.add_argument("--skip-prefilter", action="store_true",
+                        help="Skip the A0 prefilter step (assume confirmed_seeds.json already exists)")
     args = parser.parse_args()
 
     stages_to_run = ["A", "B", "C"] if args.stage == "all" else [args.stage.upper()]
+
+    # Phase A0: prefilter (only relevant if Stage A is in scope)
+    if "A" in stages_to_run and not args.skip_prefilter:
+        ok = run_prefilter(args.cluster_id, args.profile)
+        if not ok:
+            print("Aborting: prefilter failed.", file=sys.stderr)
+            return 1
+
     for st in stages_to_run:
         ok = run_stage(st, args.cluster_id, args.profile)
         if not ok:
