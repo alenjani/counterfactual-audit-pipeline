@@ -6,7 +6,8 @@ Master tracker for CAP. Skim top-to-bottom to know where things stand.
 
 | status | item | run_id | notes |
 |---|---|---|---|
-| 🔄 RUNNING | MVP at paper-grade settings (600 images) | 96570565797190 | ~9 hr ETA from launch 2026-05-02 12:34. On success → notebook 07 auto-chains. |
+| 🔄 RUNNING | **Full instrument orchestrator** | 654684771940659 (Phase A0) | Launched 2026-05-02 23:25. ~3 hr A0 → 1.5d Stage A → 5.5d Stage B → 14d Stage C. HF backups between. |
+| ✅ done | MVP-7 at paper-grade settings (600 images) | 96570565797190 | mean cosine 0.59, preserved 85% at 0.5; H1 logit verified populated |
 
 ## Where to find things
 
