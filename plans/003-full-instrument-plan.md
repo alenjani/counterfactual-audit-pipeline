@@ -43,6 +43,22 @@
 
 **Critical path: generation ≈ 22 days. Everything else is small in comparison.**
 
+### Pre-generation seed filter (added 2026-05-02 after MVP-7 analysis)
+
+MVP-7 (n=600) revealed that ~15% of cells fail identity preservation, with failures concentrated in 11 specific seed identities. Test B (face-confidence prepass) showed that simple face metrics catch ~60% of those — multi-face seed images are enriched in failures, but not all failures are multi-face. The remaining failures are deterministic per-ID (PuLID can't extract a useful embedding) and only manifest after generation.
+
+To avoid wasting GPU on seeds that will fail anyway, run a **3-step filter before Stage A**:
+
+| step | what | drops | cost |
+|---|---|---|---|
+| **0. Load oversampled pool** | Load **250** stratified FairFace candidates (default; bump to 300 if Stage 1 drops are higher) | n/a | trivial |
+| **1. Face-detection prefilter** | Run antelopev2 on each. Drop `n_faces ≥ 2` (multi-face seed images) | ~12% (~30 of 250 → 220 left) | ~5 min cluster |
+| **2. Single-cell round-trip** | For each surviving seed, generate ONE cell (default axes: skin=3, gender=preserve, age=anchor, seed=42), compute ArcFace cosine vs seed. Drop seeds with cosine < 0.5 — these are the deterministic failures | ~8-10% (~20 of 220 → ~200 left) | ~3 hr (220 cells × 3.5 min / 4 actors) |
+
+Net overhead vs no filtering: ~3 hr added before Stage A; saves ~5-10% of Stage A/B/C wall time (because broken cells are excluded). **Strongly net-positive.**
+
+If Stage 1's drop rate is higher than 10% on the first 250, bump pool to 300 and re-run Stage 1 only on the new candidates (skip-if-exists for the existing).
+
 ### Three-stage cumulative generation (locked 2026-05-02)
 
 The 36K is built incrementally — never re-doing prior work — so an interruption at any point leaves a usable dataset:

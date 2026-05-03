@@ -45,7 +45,10 @@ results/mvp_demo/                        ← First MVP outputs (April 2026, brok
 | 7c. Decide A100 swap or stay on L4 | ⏳ | — | re-estimate full-run wall after 7a/7b; A100 if > 4 wk projected |
 | 8. `configs/full.yaml` revision | ⏳ pending phase 7 | — | author once paper-grade settings confirmed at MVP scale |
 | 9. Cloud auditor API credentials | ⏳ user action | — | AWS, Azure, Google, Face++ keys → `cap-secrets` |
-| 10A. Full gen — Stage A (200 IDs × 12 axes × seed 42 = 2,400) | ⏳ pending 7-9 | — | ~1.5 days |
+| 10-pre0. Load 250 oversampled FairFace candidates | ⏳ pending 7-9 | — | trivial |
+| 10-pre1. Face-detection prefilter (drop multi-face seeds) | ⏳ | — | ~5 min |
+| 10-pre2. Single-cell round-trip validation (drop deterministic failures) | ⏳ | — | ~3 hr |
+| 10A. Full gen — Stage A (200 IDs × 12 axes × seed 42 = 2,400) | ⏳ | — | ~1.5 days |
 | 10A-bk. HF backup → `cap-counterfactuals-stage-a` | ⏳ | — | ~5 min |
 | 10B. Full gen — Stage B (+9,600 with age axis × seed 42 = 12,000 cumulative) | ⏳ | — | +5.5 days |
 | 10B-bk. HF backup → `cap-counterfactuals-stage-b` | ⏳ | — | ~25 min |
